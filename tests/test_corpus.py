@@ -5,7 +5,13 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from rag_server.corpus import classify_document, merge_document_texts, normalize_city, scan_cases_root
+from rag_server.corpus import (
+    classify_document,
+    folder_date_ordinal,
+    merge_document_texts,
+    normalize_city,
+    scan_cases_root,
+)
 from rag_server.service import CaseService
 from tests.pdf_bytes import build_text_pdf
 
@@ -189,3 +195,73 @@ def test_detect_ingest_extract_share_nested_documents(client, tmp_path: Path):
     assert "secret" not in text
     assert "junk" not in text
     assert "buried" not in text
+
+
+def test_folder_date_ordinal_reads_roc_and_gregorian():
+    assert folder_date_ordinal("1150921公開閱覽") == folder_date_ordinal("115.09.21公開閱覽")
+    assert folder_date_ordinal("115年9月21日公開閱覽") == folder_date_ordinal("1150921公開閱覽")
+    assert folder_date_ordinal("1150921公開閱覽") > folder_date_ordinal("1141231公開閱覽")
+    assert folder_date_ordinal("20260921公開閱覽") == folder_date_ordinal("1150921公開閱覽")
+    assert folder_date_ordinal("公開閱覽") is None
+
+
+def _write_repeated_viewings(root: Path) -> Path:
+    case = root / "1.都市更新" / "00示範市" / "示範市都更案"
+    older = case / "1140101公開閱覽"
+    newer = case / "1150921公開閱覽" / "公告"
+    previous_selection = case / "1130501" / "公開閱覽"
+    for folder in (older, newer, previous_selection):
+        folder.mkdir(parents=True)
+    (older / "申請須知.txt").write_text("舊申請須知", encoding="utf-8")
+    (older / "需求說明書.txt").write_text("唯一需求說明書", encoding="utf-8")
+    (newer / "申請須知.txt").write_text("新申請須知", encoding="utf-8")
+    (newer / "實施出資契約.txt").write_text("新契約", encoding="utf-8")
+    (newer / "評選文件.txt").write_text("新評選", encoding="utf-8")
+    (previous_selection / "評選文件.txt").write_text("舊評選", encoding="utf-8")
+    (case / "申請須知.txt").write_text("頂層舊須知", encoding="utf-8")
+    (case / "其他").mkdir()
+    (case / "其他" / "備註.txt").write_text("現場備註", encoding="utf-8")
+    return case
+
+
+def test_scan_keeps_latest_viewing_copy_of_each_investment_document(tmp_path: Path):
+    case_dir = _write_repeated_viewings(tmp_path)
+    documents = scan_cases_root(tmp_path)[0].documents
+    paths = {document.path.relative_to(case_dir).as_posix() for document in documents}
+    assert paths == {
+        "1150921公開閱覽/公告/申請須知.txt",
+        "1140101公開閱覽/需求說明書.txt",
+        "1150921公開閱覽/公告/實施出資契約.txt",
+        "1150921公開閱覽/公告/評選文件.txt",
+        "其他/備註.txt",
+    }
+
+
+def test_detect_ingest_extract_use_latest_viewing_copy(client, tmp_path: Path):
+    case_dir = _write_repeated_viewings(tmp_path)
+    root = str(tmp_path)
+    detected = client.post("/api/pipeline/detect", json={"root": root})
+    assert detected.status_code == 200
+    sources = [item["source_path"] for item in detected.json()["cases"][0]["documents"]]
+    assert any(path.endswith("1150921公開閱覽/公告/申請須知.txt") for path in sources)
+    assert not any("1140101公開閱覽/申請須知.txt" in path for path in sources)
+    assert not any(path.endswith(f"{case_dir.name}/申請須知.txt") for path in sources)
+
+    ingested = client.post("/api/pipeline/ingest", json={"root": root})
+    assert ingested.status_code == 200
+    assert ingested.json()["documents_indexed"] == 5
+
+    extracted = client.post(
+        "/api/pipeline/extract",
+        json={"root": root, "caseFolder": str(case_dir)},
+    )
+    assert extracted.status_code == 200
+    text = extracted.json()["pdfText"]
+    assert "新申請須知" in text
+    assert "唯一需求說明書" in text
+    assert "新契約" in text
+    assert "新評選" in text
+    assert "現場備註" in text
+    assert "舊申請須知" not in text
+    assert "舊評選" not in text
+    assert "頂層舊須知" not in text
