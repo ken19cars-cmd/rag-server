@@ -90,7 +90,7 @@ def test_notion_query_keeps_only_completed_pages():
                 "id": "page-done",
                 "properties": {
                     "案件名稱": {"type": "title", "title": [{"plain_text": "示範完成案"}]},
-                    "招商情形": {"type": "select", "select": {"name": "招標完成"}},
+                    "招商情形": {"type": "status", "status": {"name": "招標完成"}},
                     "縣市別": {"type": "select", "select": {"name": "示範市"}},
                     "案件類型": {"type": "select", "select": {"name": "公辦都更"}},
                     "投標廠商1(最優申請人)": {
@@ -103,7 +103,7 @@ def test_notion_query_keeps_only_completed_pages():
                 "id": "page-open",
                 "properties": {
                     "案件名稱": {"type": "title", "title": [{"plain_text": "示範公告案"}]},
-                    "招商情形": {"type": "select", "select": {"name": "公告中"}},
+                    "招商情形": {"type": "status", "status": {"name": "公告中"}},
                 },
             },
         ]
@@ -129,7 +129,7 @@ def test_fetch_notion_database_sends_completed_filter():
     assert payload == {"results": []}
     assert seen["url"] == "https://api.notion.com/v1/databases/db123/query"
     assert seen["auth"] == "Bearer secret-token"
-    assert seen["body"]["filter"]["select"]["equals"] == "招標完成"
+    assert seen["body"]["filter"]["status"]["equals"] == "招標完成"
 
 
 def test_research_respects_robots_and_keeps_rendering_urls():

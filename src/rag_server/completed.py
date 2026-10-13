@@ -104,7 +104,7 @@ def fetch_notion_database(
             json={
                 "filter": {
                     "property": "招商情形",
-                    "select": {"equals": "招標完成"},
+                    "status": {"equals": "招標完成"},
                 }
             },
         )
