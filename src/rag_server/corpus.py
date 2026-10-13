@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 ALLOWED_SUFFIXES = {".pdf", ".txt"}
+SKIP_DIR_NAMES = frozenset({"__MACOSX", ".git"})
 
 DOC_KINDS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ("application_notice", "申請須知", ("申請須知",)),
@@ -77,12 +78,35 @@ def scan_cases_root(root: Path) -> list[CorpusCase]:
     return cases
 
 
+def iter_case_files(case_dir: Path) -> list[Path]:
+    """PDF and txt under a case folder, including nested folders.
+
+    detect, ingest, and extract all read documents through ``scan_cases_root``,
+    which uses this walk. ``__MACOSX`` and ``.git`` directories are not entered.
+    """
+    found: list[Path] = []
+
+    def walk(directory: Path) -> None:
+        try:
+            children = list(directory.iterdir())
+        except OSError:
+            return
+        for child in children:
+            if child.is_dir():
+                if child.name in SKIP_DIR_NAMES:
+                    continue
+                walk(child)
+                continue
+            if child.is_file() and child.suffix.lower() in ALLOWED_SUFFIXES:
+                found.append(child)
+
+    walk(case_dir)
+    return sorted(found, key=lambda path: path.relative_to(case_dir).as_posix())
+
+
 def _documents_in_case(case_type: str, city_folder: str, case_dir: Path) -> list[CorpusFile]:
     documents: list[CorpusFile] = []
-    files = sorted(
-        path for path in case_dir.iterdir() if path.is_file() and path.suffix.lower() in ALLOWED_SUFFIXES
-    )
-    for path in files:
+    for path in iter_case_files(case_dir):
         kind, label = classify_document(path.name)
         documents.append(
             CorpusFile(

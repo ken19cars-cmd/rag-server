@@ -122,3 +122,70 @@ def json_blocks() -> list[dict]:
     import json
 
     return json.loads((FIXTURES / "template_blocks.json").read_text(encoding="utf-8"))
+
+
+def _write_nested_case(root: Path) -> Path:
+    case = root / "1.都市更新" / "00示範市" / "示範市都更案"
+    viewing = case / "1150921公開閱覽"
+    viewing.mkdir(parents=True)
+    (viewing / "更深").mkdir()
+    (case / "__MACOSX" / "1150921公開閱覽").mkdir(parents=True)
+    (case / ".git").mkdir()
+    (case / "notes" / "__MACOSX").mkdir(parents=True)
+    (case / "申請須知.txt").write_text("頂層須知", encoding="utf-8")
+    (viewing / "補充.txt").write_text("公開閱覽補充", encoding="utf-8")
+    (viewing / "更深" / "第二層.txt").write_text("第二層補充", encoding="utf-8")
+    (viewing / "公開說明.pdf").write_bytes(
+        build_text_pdf(["nested public viewing document for this case"])
+    )
+    (case / "__MACOSX" / "1150921公開閱覽" / "macosx-junk.pdf").write_bytes(b"%PDF-1.4 junk")
+    (case / ".git" / "git-secret.txt").write_text("secret", encoding="utf-8")
+    (case / "notes" / "__MACOSX" / "buried.pdf").write_bytes(b"%PDF-1.4 buried")
+    return case
+
+
+def test_scan_includes_nested_pdf_and_txt_but_skips_macosx_and_git(tmp_path: Path):
+    case_dir = _write_nested_case(tmp_path)
+    cases = scan_cases_root(tmp_path)
+    assert len(cases) == 1
+    case = cases[0]
+    assert case.folder == case_dir
+    names = {document.filename for document in case.documents}
+    assert names == {"申請須知.txt", "補充.txt", "第二層.txt", "公開說明.pdf"}
+    paths = {document.path.relative_to(case_dir).as_posix() for document in case.documents}
+    assert "1150921公開閱覽/公開說明.pdf" in paths
+    assert "1150921公開閱覽/更深/第二層.txt" in paths
+    assert all("__MACOSX" not in path and not path.startswith(".git/") for path in paths)
+
+
+def test_detect_ingest_extract_share_nested_documents(client, tmp_path: Path):
+    case_dir = _write_nested_case(tmp_path)
+    root = str(tmp_path)
+    expected = {"申請須知.txt", "補充.txt", "第二層.txt", "公開說明.pdf"}
+
+    detected = client.post("/api/pipeline/detect", json={"root": root})
+    assert detected.status_code == 200
+    urban = detected.json()["cases"][0]
+    detected_names = {document["filename"] for document in urban["documents"]}
+    assert detected_names == expected
+    assert all("__MACOSX" not in document["source_path"] for document in urban["documents"])
+    assert all("/.git/" not in document["source_path"] for document in urban["documents"])
+
+    ingested = client.post("/api/pipeline/ingest", json={"root": root})
+    assert ingested.status_code == 200
+    assert ingested.json()["documents_indexed"] == 4
+    again = client.post("/api/pipeline/ingest", json={"root": root})
+    assert again.json()["documents_indexed"] == 0
+
+    extracted = client.post(
+        "/api/pipeline/extract",
+        json={"root": root, "caseFolder": str(case_dir)},
+    )
+    assert extracted.status_code == 200
+    text = extracted.json()["pdfText"]
+    assert "公開閱覽補充" in text
+    assert "第二層補充" in text
+    assert "nested public viewing document" in text
+    assert "secret" not in text
+    assert "junk" not in text
+    assert "buried" not in text
