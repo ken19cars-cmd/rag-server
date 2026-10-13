@@ -216,6 +216,10 @@ def create_app(
         root = payload.root if payload else ""
         return app.state.service.ingest_corpus(root)
 
+    @app.get("/api/pipeline/local-match")
+    def local_match(root: str = "") -> dict:
+        return app.state.service.match_open_notion_cases(root)
+
     @app.post(
         "/api/notion/analyze",
         response_model=NotionAnalysisResult,

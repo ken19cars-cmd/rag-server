@@ -8,10 +8,13 @@ from pathlib import Path
 import httpx
 
 from rag_server.completed import (
+    OPEN_STATUS_FILTER,
     CompletedCase,
+    case_match_key,
     cases_from_notion_query,
     fetch_notion_database,
     load_case_file,
+    pair_notion_pages_to_folders,
     research_case,
 )
 from rag_server.config import Settings
@@ -126,9 +129,11 @@ def test_fetch_notion_database_sends_completed_filter():
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         payload = fetch_notion_database("secret-token", "db123", client=client)
-    assert payload == {"results": []}
+    assert payload["results"] == []
+    assert payload["has_more"] is False
     assert seen["url"] == "https://api.notion.com/v1/databases/db123/query"
     assert seen["auth"] == "Bearer secret-token"
+    assert seen["body"]["page_size"] == 100
     assert seen["body"]["filter"]["status"]["equals"] == "招標完成"
 
 
@@ -189,3 +194,165 @@ def test_completed_route_reads_the_offline_file(tmp_path: Path):
     with TestClient(create_app(bare, embedder=FakeEmbedder())) as client:
         missing = client.get("/api/completed")
         assert missing.status_code == 400
+
+
+def test_fetch_notion_database_follows_cursor():
+    calls: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        calls.append(body)
+        if "start_cursor" not in body:
+            return httpx.Response(
+                200,
+                json={"results": [{"id": "a"}], "has_more": True, "next_cursor": "cur-2"},
+            )
+        return httpx.Response(200, json={"results": [{"id": "b"}], "has_more": False})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        payload = fetch_notion_database("secret-token", "db123", client=client)
+    assert [item["id"] for item in payload["results"]] == ["a", "b"]
+    assert payload["has_more"] is False
+    assert calls[1]["start_cursor"] == "cur-2"
+    assert calls[0]["page_size"] == 100
+
+
+def test_open_notion_query_skips_completed_pages():
+    payload = {
+        "results": [
+            {
+                "id": "page-open",
+                "properties": {
+                    "案件名稱": {"type": "title", "title": [{"plain_text": "示範公告案"}]},
+                    "招商情形": {"type": "status", "status": {"name": "公告中"}},
+                },
+            },
+            {
+                "id": "page-blank",
+                "properties": {
+                    "案件名稱": {"type": "title", "title": [{"plain_text": "未填情形"}]},
+                    "招商情形": {"type": "status", "status": None},
+                },
+            },
+            {
+                "id": "page-done",
+                "properties": {
+                    "案件名稱": {"type": "title", "title": [{"plain_text": "示範完成案"}]},
+                    "招商情形": {"type": "status", "status": {"name": "招標完成"}},
+                },
+            },
+        ]
+    }
+    cases = cases_from_notion_query(payload, completed_only=False)
+    assert [case.case_name for case in cases] == ["示範公告案", "未填情形"]
+    assert cases[1].status == ""
+
+
+def test_case_match_key_folds_tai_space_and_dashes():
+    assert case_match_key(" 台北市信義－段 ") == case_match_key("臺北市信義-段")
+    assert case_match_key("ＡＢＣ") == case_match_key("abc")
+
+
+def test_pair_leaves_colliding_names_unmatched():
+    pages = [
+        CompletedCase(case_name="重複案", status="公告中", notion_page_id="p1"),
+        CompletedCase(case_name="重複案", status="進行中", notion_page_id="p2"),
+    ]
+    folder = type("Folder", (), {})()
+    folder.case_name = "重複案"
+    folder.city = "臺北市"
+    folder.case_type = "都更"
+    folder.folder = Path("重複案")
+    folder.documents = []
+    paired = pair_notion_pages_to_folders(pages, [folder])
+    assert paired["matched"] == []
+    assert [item["notion_page_id"] for item in paired["notion_without_folder"]] == ["p1", "p2"]
+    assert paired["folder_without_notion"][0]["case_name"] == "重複案"
+
+
+def test_local_match_pairs_open_pages_and_skips_completed(tmp_path: Path, monkeypatch):
+    root = tmp_path / "cases"
+    case_dir = root / "1.都市更新" / "00臺北市" / "台北市信義段小案"
+    (case_dir / "1150921公開閱覽").mkdir(parents=True)
+    (case_dir / "1140101公開閱覽").mkdir()
+    (case_dir / "1150921公開閱覽" / "申請須知.txt").write_text("新", encoding="utf-8")
+    (case_dir / "1140101公開閱覽" / "申請須知.txt").write_text("舊", encoding="utf-8")
+    orphan = root / "1.都市更新" / "00臺北市" / "只有資料夾"
+    orphan.mkdir(parents=True)
+    (orphan / "需求說明書.txt").write_text("x", encoding="utf-8")
+
+    seen: dict = {}
+
+    def fake_fetch(token, database_id, *, client=None, status_filter=None):
+        seen["token"] = token
+        seen["database_id"] = database_id
+        seen["filter"] = status_filter
+        return {
+            "results": [
+                {
+                    "id": "page-open",
+                    "properties": {
+                        "案件名稱": {"type": "title", "title": [{"plain_text": "臺北市信義段小案"}]},
+                        "招商情形": {"type": "status", "status": {"name": "公告中"}},
+                    },
+                },
+                {
+                    "id": "page-done",
+                    "properties": {
+                        "案件名稱": {"type": "title", "title": [{"plain_text": "只有資料夾"}]},
+                        "招商情形": {"type": "status", "status": {"name": "招標完成"}},
+                    },
+                },
+                {
+                    "id": "page-missing",
+                    "properties": {
+                        "案件名稱": {"type": "title", "title": [{"plain_text": "沒有資料夾"}]},
+                        "招商情形": {"type": "status", "status": {"name": "進行中"}},
+                    },
+                },
+            ],
+            "has_more": False,
+        }
+
+    monkeypatch.setattr("rag_server.service.fetch_notion_database", fake_fetch)
+    settings = Settings(
+        data_dir=str(tmp_path / "data"),
+        embedding_backend="fake",
+        notion_token="secret",
+        notion_database_id="db123",
+        llm_base_url="",
+        llm_api_key="",
+        llm_model="",
+    )
+    from fastapi.testclient import TestClient
+
+    with TestClient(create_app(settings, embedder=FakeEmbedder())) as client:
+        listed = client.get("/api/pipeline/local-match", params={"root": str(root)})
+    assert seen["token"] == "secret"
+    assert seen["database_id"] == "db123"
+    assert seen["filter"] == OPEN_STATUS_FILTER
+    assert listed.status_code == 200
+    body = listed.json()
+    assert len(body["matched"]) == 1
+    hit = body["matched"][0]
+    assert hit["case_name"] == "臺北市信義段小案"
+    assert hit["folder_name"] == "台北市信義段小案"
+    assert hit["notion_page_id"] == "page-open"
+    assert hit["status"] == "公告中"
+    assert hit["city"] == "臺北市"
+    assert hit["case_type"] == "1.都市更新"
+    assert [doc["filename"] for doc in hit["documents"]] == ["申請須知.txt"]
+    assert "1150921" in hit["documents"][0]["source_path"]
+    assert [item["case_name"] for item in body["notion_without_folder"]] == ["沒有資料夾"]
+    assert [item["case_name"] for item in body["folder_without_notion"]] == ["只有資料夾"]
+
+    bare = Settings(
+        data_dir=str(tmp_path / "empty"),
+        embedding_backend="fake",
+        llm_base_url="",
+        llm_api_key="",
+        llm_model="",
+    )
+    with TestClient(create_app(bare, embedder=FakeEmbedder())) as client:
+        denied = client.get("/api/pipeline/local-match", params={"root": str(root)})
+    assert denied.status_code == 400

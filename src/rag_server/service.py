@@ -9,11 +9,13 @@ from pypdf.errors import PdfReadError
 from rag_server.analysis import analyze_case, answer_question
 from rag_server.chunking import chunk_pages
 from rag_server.completed import (
+    OPEN_STATUS_FILTER,
     CompletedCase,
     SearchBackend,
     cases_from_notion_query,
     fetch_notion_database,
     load_case_file,
+    pair_notion_pages_to_folders,
     research_case,
 )
 from rag_server.config import Settings
@@ -436,6 +438,24 @@ class CaseService:
             template_blocks=template_blocks or [],
             llm=self.llm,
         )
+
+    def match_open_notion_cases(self, root: str = "") -> dict:
+        """Pair Notion pages that are not 招標完成 with local case folders."""
+        token = self.settings.notion_token.strip()
+        database_id = self.settings.notion_database_id.strip()
+        if not token or not database_id:
+            raise IngestError("set RAG_NOTION_TOKEN and RAG_NOTION_DATABASE_ID")
+        try:
+            payload = fetch_notion_database(
+                token,
+                database_id,
+                status_filter=OPEN_STATUS_FILTER,
+            )
+        except RuntimeError as exc:
+            raise IngestError(str(exc)) from exc
+        pages = cases_from_notion_query(payload, completed_only=False)
+        folders = scan_cases_root(self._cases_root(root))
+        return pair_notion_pages_to_folders(pages, folders)
 
     def list_completed(self) -> list[CompletedCase]:
         path = self.settings.completed_cases_file.strip()

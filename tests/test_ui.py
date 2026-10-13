@@ -23,6 +23,8 @@ def test_status_page_lists_ready_and_phase2(client):
         assert 'href="/docs"' in page
         assert "Tailscale" in page
         assert "CASES_ROOT" in page
+    assert "對上本地案件" in page
+    assert "/api/pipeline/local-match" in page
 
 
 def test_ui_status_reports_missing_cases_root(client):

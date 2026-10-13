@@ -155,6 +155,10 @@
           <p><code>POST /api/pipeline/detect</code>。讀電腦 A 的 <code>RAG_CASES_ROOT</code>（<code>D:\…\招商案件</code>）。</p>
         </article>
         <article>
+          <h3>未完成頁對上資料夾</h3>
+          <p><code>GET /api/pipeline/local-match</code>。只查 Notion 裡不是「招標完成」的頁，用頁名對案件夾。不寫入 Notion。</p>
+        </article>
+        <article>
           <h3>PDF 寫入與合併</h3>
           <p><code>POST /api/pipeline/ingest</code> 整樹寫入索引。<code>POST /api/pipeline/extract</code> 合併成分析用文字。有文字層就抽取；掃描頁要 OCR。</p>
         </article>
@@ -211,9 +215,10 @@
 
     <section class="panel">
       <h2>案件資料夾</h2>
-      <p class="lede">掃描使用環境裡的 <code>RAG_CASES_ROOT</code>。沒設定就會直接說明，不會顯示空的成功清單。內建示範樹在這個專案裡，不需要 D:。</p>
+      <p class="lede">掃描使用環境裡的 <code>RAG_CASES_ROOT</code>。沒設定就會直接說明，不會顯示空的成功清單。內建示範樹在這個專案裡，不需要 D:。「對上本地案件」只讀不是「招標完成」的 Notion 頁，用頁名對資料夾，不會寫回 Notion。</p>
       <button type="button" id="scan">掃描 CASES_ROOT</button>
       <button type="button" id="scan-demo">掃描內建示範樹</button>
+      <button type="button" id="local-match">對上本地案件</button>
       <pre id="scan-out">尚未掃描。</pre>
     </section>
 
@@ -294,6 +299,9 @@
       if (detail.includes("not a directory")) {
         return "RAG_CASES_ROOT 不是資料夾。\n" + detail;
       }
+      if (detail.includes("RAG_NOTION_TOKEN")) {
+        return "尚未設定 RAG_NOTION_TOKEN 或 RAG_NOTION_DATABASE_ID。請在電腦 A 的 .env 填好後，從 rag-server-new 重新啟動。";
+      }
       return "掃描失敗（" + status + "）\n" + detail;
     }
 
@@ -316,6 +324,39 @@
       });
       const body = await res.json();
       out.textContent = res.ok ? formatCases(body) : explainScan(res.status, body);
+    }
+
+    function formatMatch(payload) {
+      const lines = [];
+      const matched = payload.matched || [];
+      lines.push("對上 " + matched.length + " 件（尚未寫入 Notion）");
+      matched.forEach((item) => {
+        const docs = (item.documents || []).map((doc) => doc.filename + "（" + doc.doc_kind + "）").join("、") || "沒有 PDF/txt";
+        lines.push(item.status + " / " + item.case_name + " → " + item.folder_name);
+        lines.push("  " + item.case_type + " / " + item.city);
+        lines.push("  " + docs);
+      });
+      const missingFolder = payload.notion_without_folder || [];
+      lines.push("");
+      lines.push("Notion 有、資料夾沒有 " + missingFolder.length + " 件");
+      missingFolder.forEach((item) => {
+        lines.push((item.status || "未填招商情形") + " / " + item.case_name);
+      });
+      const missingPage = payload.folder_without_notion || [];
+      lines.push("");
+      lines.push("資料夾有、Notion 沒有 " + missingPage.length + " 件");
+      missingPage.forEach((item) => {
+        lines.push(item.case_type + " / " + item.city + " / " + item.case_name);
+      });
+      return lines.join("\n");
+    }
+
+    async function matchLocal() {
+      const out = document.getElementById("scan-out");
+      out.textContent = "對照中…";
+      const res = await fetch("/api/pipeline/local-match");
+      const body = await res.json();
+      out.textContent = res.ok ? formatMatch(body) : explainScan(res.status, body);
     }
 
     async function loadDemo() {
@@ -416,6 +457,7 @@
 
     document.getElementById("scan").addEventListener("click", () => scan(""));
     document.getElementById("scan-demo").addEventListener("click", () => scan(demo.demoRoot));
+    document.getElementById("local-match").addEventListener("click", matchLocal);
     document.getElementById("analyze").addEventListener("click", analyze);
     document.getElementById("ask").addEventListener("click", ask);
     document.getElementById("research").addEventListener("click", research);

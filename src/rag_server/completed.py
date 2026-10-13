@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import csv
 import json
+import re
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urljoin
@@ -84,35 +86,57 @@ def load_case_file(path: Path) -> list[CompletedCase]:
     return [_case_from_mapping(item) for item in payload if isinstance(item, dict)]
 
 
+COMPLETED_STATUS_FILTER = {
+    "property": "招商情形",
+    "status": {"equals": "招標完成"},
+}
+OPEN_STATUS_FILTER = {
+    "property": "招商情形",
+    "status": {"does_not_equal": "招標完成"},
+}
+
+
 def fetch_notion_database(
     token: str,
     database_id: str,
     *,
     client: httpx.Client | None = None,
+    status_filter: dict | None = None,
 ) -> dict:
-    """Query Notion for 招標完成 pages. Tests pass a client; the default opens one."""
+    """Query a Notion database. The default filter is 招商情形 = 招標完成.
+
+    Tests pass a client; the default opens one. Follows next_cursor until the
+    database is exhausted.
+    """
+    chosen = status_filter or COMPLETED_STATUS_FILTER
     owns = client is None
     http = client or httpx.Client(timeout=20.0)
+    results: list = []
+    cursor = None
     try:
-        response = http.post(
-            f"https://api.notion.com/v1/databases/{database_id}/query",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Notion-Version": NOTION_VERSION,
-                "Content-Type": "application/json",
-            },
-            json={
-                "filter": {
-                    "property": "招商情形",
-                    "status": {"equals": "招標完成"},
-                }
-            },
-        )
-        response.raise_for_status()
-        payload = response.json()
-        if not isinstance(payload, dict):
-            raise RuntimeError("notion query did not return an object")
-        return payload
+        while True:
+            body: dict = {"filter": chosen, "page_size": 100}
+            if cursor:
+                body["start_cursor"] = cursor
+            response = http.post(
+                f"https://api.notion.com/v1/databases/{database_id}/query",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Notion-Version": NOTION_VERSION,
+                    "Content-Type": "application/json",
+                },
+                json=body,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise RuntimeError("notion query did not return an object")
+            results.extend(payload.get("results") or [])
+            if not payload.get("has_more"):
+                return {"results": results, "has_more": False}
+            cursor = payload.get("next_cursor")
+            if not cursor:
+                return {"results": results, "has_more": False}
     except httpx.HTTPError as exc:
         raise RuntimeError(f"notion query failed: {exc}") from exc
     finally:
@@ -120,8 +144,12 @@ def fetch_notion_database(
             http.close()
 
 
-def cases_from_notion_query(payload: dict) -> list[CompletedCase]:
-    """Map a Notion database query body. Property names follow the existing site."""
+def cases_from_notion_query(payload: dict, *, completed_only: bool = True) -> list[CompletedCase]:
+    """Map a Notion database query body. Property names follow the existing site.
+
+    ``completed_only`` keeps 招標完成 pages. Local-folder matching passes
+    ``completed_only=False`` and skips those pages.
+    """
     cases: list[CompletedCase] = []
     for page in payload.get("results") or []:
         props = page.get("properties") or {}
@@ -129,7 +157,9 @@ def cases_from_notion_query(payload: dict) -> list[CompletedCase]:
         if not name:
             continue
         status = _notion_text(props, ("招商情形", "狀態", "Status"))
-        if status and status != "招標完成":
+        if completed_only and status != "招標完成":
+            continue
+        if not completed_only and status == "招標完成":
             continue
         cases.append(
             CompletedCase(
@@ -141,10 +171,120 @@ def cases_from_notion_query(payload: dict) -> list[CompletedCase]:
                     props,
                     ("投標廠商1(最優申請人)", "投標廠商1（最優申請人）", "投標廠商1", "最優申請人"),
                 ),
-                status=status or "招標完成",
+                status=status or ("招標完成" if completed_only else ""),
             )
         )
     return cases
+
+
+_DASHES = str.maketrans(
+    {
+        "\u2010": "-",
+        "\u2011": "-",
+        "\u2012": "-",
+        "\u2013": "-",
+        "\u2014": "-",
+        "\u2015": "-",
+        "\u2212": "-",
+        "\ufe58": "-",
+        "\ufe63": "-",
+        "\uff0d": "-",
+    }
+)
+
+
+def case_match_key(name: str) -> str:
+    """Fold a Notion title and a case-folder name onto one comparison key.
+
+    NFKC folds full-width letters. 台 and 臺 count as the same character.
+    Spaces drop out, and dash variants become ASCII hyphens.
+    """
+    folded = unicodedata.normalize("NFKC", name).translate(_DASHES).replace("台", "臺")
+    return re.sub(r"\s+", "", folded).casefold()
+
+
+def pair_notion_pages_to_folders(pages: list[CompletedCase], folders: list) -> dict:
+    """Pair open Notion pages to local case folders by normalized name.
+
+    A pair is kept only when exactly one page and one folder share the key.
+    Collisions stay in the unmatched lists so a later write cannot pick the
+    wrong page. ``folders`` are corpus cases from ``scan_cases_root``.
+    """
+    folders_by_key: dict[str, list] = {}
+    for folder in folders:
+        folders_by_key.setdefault(case_match_key(folder.case_name), []).append(folder)
+
+    pages_by_key: dict[str, list[CompletedCase]] = {}
+    for page in pages:
+        pages_by_key.setdefault(case_match_key(page.case_name), []).append(page)
+
+    matched: list[dict] = []
+    notion_without_folder: list[dict] = []
+    used_folder_ids: set[int] = set()
+    for page in pages:
+        key = case_match_key(page.case_name)
+        page_group = pages_by_key[key]
+        folder_group = folders_by_key.get(key) or []
+        if len(page_group) == 1 and len(folder_group) == 1:
+            folder = folder_group[0]
+            matched.append(_matched_row(page, folder))
+            used_folder_ids.add(id(folder))
+        else:
+            notion_without_folder.append(_notion_only_row(page))
+
+    folder_without_notion = [
+        _folder_only_row(folder) for folder in folders if id(folder) not in used_folder_ids
+    ]
+    return {
+        "matched": matched,
+        "notion_without_folder": notion_without_folder,
+        "folder_without_notion": folder_without_notion,
+    }
+
+
+def _document_rows(documents: list) -> list[dict]:
+    return [
+        {
+            "filename": document.filename,
+            "source_path": str(document.path),
+            "doc_kind": document.doc_kind,
+            "doc_kind_label": document.doc_kind_label,
+        }
+        for document in documents
+    ]
+
+
+def _matched_row(page: CompletedCase, folder) -> dict:
+    return {
+        "case_name": page.case_name,
+        "folder_name": folder.case_name,
+        "notion_page_id": page.notion_page_id,
+        "status": page.status,
+        "city": folder.city,
+        "case_type": folder.case_type,
+        "source_path": str(folder.folder),
+        "documents": _document_rows(folder.documents),
+    }
+
+
+def _notion_only_row(page: CompletedCase) -> dict:
+    return {
+        "case_name": page.case_name,
+        "notion_page_id": page.notion_page_id,
+        "status": page.status,
+        "city": page.city,
+        "case_type": page.case_type,
+    }
+
+
+def _folder_only_row(folder) -> dict:
+    return {
+        "case_name": folder.case_name,
+        "city": folder.city,
+        "case_type": folder.case_type,
+        "source_path": str(folder.folder),
+        "documents": _document_rows(folder.documents),
+    }
 
 
 def research_case(
