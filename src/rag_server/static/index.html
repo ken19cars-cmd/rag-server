@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>招商案件 RAG 狀態</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f4f1ea;
+      --ink: #1c1915;
+      --muted: #5c564c;
+      --card: #fffdf8;
+      --line: #e4ddd0;
+      --ready: #1f6b45;
+      --ready-bg: #e7f5ec;
+      --later: #8a5a12;
+      --later-bg: #fbf3e4;
+      --bad: #8d2f2f;
+      --bad-bg: #fdecec;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+      line-height: 1.55;
+    }
+    header, main { width: min(1080px, calc(100% - 32px)); margin: 0 auto; }
+    header { padding: 28px 0 8px; }
+    h1 { font-size: 1.7rem; margin: 0 0 8px; }
+    h2 { font-size: 1.15rem; margin: 0 0 12px; }
+    a { color: #1d4e89; }
+    .lede { margin: 0; color: var(--muted); }
+    .arch {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin: 14px 0 0;
+    }
+    .pill {
+      display: inline-block;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: var(--card);
+      border: 1px solid var(--line);
+      font-size: 0.92rem;
+    }
+    .status {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 10px;
+      margin: 18px 0;
+    }
+    .chip {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 10px 12px;
+    }
+    .chip b { display: block; font-size: 0.82rem; color: var(--muted); font-weight: 600; }
+    .chip.on { border-color: #b7dfc6; background: var(--ready-bg); }
+    .chip.off { border-color: #f0c9c9; background: var(--bad-bg); }
+    .board {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+    @media (max-width: 800px) { .board { grid-template-columns: 1fr; } }
+    .col {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 16px 16px 8px;
+    }
+    .col.ready { box-shadow: inset 4px 0 0 var(--ready); }
+    .col.later { box-shadow: inset 4px 0 0 var(--later); }
+    .col.ready h2 { color: var(--ready); }
+    .col.later h2 { color: var(--later); }
+    article {
+      border-top: 1px solid var(--line);
+      padding: 10px 0 12px;
+    }
+    article h3 { margin: 0 0 4px; font-size: 1rem; }
+    article p { margin: 0; color: var(--muted); font-size: 0.95rem; }
+    code { font-family: ui-monospace, "Cascadia Code", monospace; font-size: 0.86em; }
+    section.panel {
+      margin: 18px 0 28px;
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 16px;
+    }
+    label { display: block; margin: 8px 0; }
+    input[type="text"] {
+      width: min(420px, 100%);
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      font: inherit;
+    }
+    button {
+      font: inherit;
+      border: 0;
+      background: #1d4e89;
+      color: white;
+      border-radius: 8px;
+      padding: 8px 12px;
+      margin: 4px 8px 4px 0;
+      cursor: pointer;
+    }
+    button.ghost {
+      background: transparent;
+      color: var(--later);
+      border: 1px solid #e4c48a;
+    }
+    button:disabled { opacity: 0.6; cursor: wait; }
+    pre {
+      white-space: pre-wrap;
+      word-break: break-word;
+      background: #1c1915;
+      color: #f4f1ea;
+      border-radius: 10px;
+      padding: 12px;
+      min-height: 2.5rem;
+      font-size: 0.85rem;
+    }
+    .warn { color: var(--bad); }
+    footer { color: var(--muted); font-size: 0.9rem; padding-bottom: 28px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>招商案件 RAG 狀態</h1>
+    <p class="lede">這一頁只反映現在真正接上的功能。分析 JSON 不會寫回 Notion。</p>
+    <div class="arch">
+      <span class="pill">電腦 A：案件 PDF（CASES_ROOT）與這個服務</span>
+      <span class="pill">電腦 B：Ollama，只經 Tailscale</span>
+      <span class="pill"><a href="/docs">API 文件 /docs</a></span>
+    </div>
+    <div class="status" id="env">讀取環境狀態…</div>
+    <p id="root-note" class="warn" hidden></p>
+  </header>
+  <main>
+    <div class="board">
+      <div class="col ready" id="ready">
+        <h2>可用</h2>
+        <article>
+          <h3>健康檢查</h3>
+          <p><code>GET /health</code>。嵌入後端、分析模式、Ollama 是否接上、OCR 是否裝好。</p>
+        </article>
+        <article>
+          <h3>案件樹掃描</h3>
+          <p><code>POST /api/pipeline/detect</code>。讀電腦 A 的 <code>RAG_CASES_ROOT</code>（<code>D:\…\招商案件</code>）。</p>
+        </article>
+        <article>
+          <h3>PDF 寫入與合併</h3>
+          <p><code>POST /api/pipeline/ingest</code> 整樹寫入索引。<code>POST /api/pipeline/extract</code> 合併成分析用文字。有文字層就抽取；掃描頁要 OCR。</p>
+        </article>
+        <article>
+          <h3>問答</h3>
+          <p><code>POST /api/cases/{id}/query</code>。抽取式，句子必須能在文件裡找到。不走 Ollama。</p>
+        </article>
+        <article>
+          <h3>Notion 分析 JSON</h3>
+          <p><code>POST /api/notion/analyze</code>。只回第 38 節 JSON（pageId、caseName、baseTable、landUseTable、updates）。不寫入 Notion。有設模型才連電腦 B。</p>
+        </article>
+        <article>
+          <h3>招標完成研究</h3>
+          <p><code>GET /api/completed</code> 讀 JSON/CSV，或在沒有清單檔時查 Notion「招標完成」。<code>POST /api/completed/research</code> 只抓你貼上的公開網址，並遵守 robots.txt。</p>
+        </article>
+        <article>
+          <h3>Ollama</h3>
+          <p>電腦 B。A 的 <code>RAG_LLM_BASE_URL</code> 指到 <code>http://&lt;B 的 Tailscale IP&gt;:11434/v1</code>，並設定 <code>RAG_LLM_MODEL</code>。兩項都有才啟用。不要對公網開放。</p>
+        </article>
+        <article>
+          <h3>OCR</h3>
+          <p>裝了 Tesseract 才會讀掃描頁。沒裝時掃描頁標成抽不出文字，不會假裝讀到內容。</p>
+        </article>
+      </div>
+      <div class="col later" id="later">
+        <h2>尚未完成／Phase 2</h2>
+        <article>
+          <h3>Notion 寫回與資料表</h3>
+          <p><code>POST /api/pipeline/notion/write</code> 現在回 501。分析 JSON 停在這台服務，不會更新 Notion 頁面。</p>
+        </article>
+        <article>
+          <h3>表格上色</h3>
+          <p>跟寫回同一支，尚未做。這一頁沒有上色按鈕。</p>
+        </article>
+        <article>
+          <h3>期程 SVG</h3>
+          <p><code>POST /api/pipeline/schedule/svg</code> 回 501。❯期程規範 目前只以文字放進 JSON。</p>
+        </article>
+        <article>
+          <h3>期程 PPTX</h3>
+          <p><code>POST /api/pipeline/schedule/pptx</code> 回 501。</p>
+        </article>
+        <article>
+          <h3>檔案放在 A、服務跑在 B</h3>
+          <p>尚未做。請維持電腦 A 讀 PDF 並跑服務，電腦 B 只跑 Ollama。</p>
+        </article>
+        <p>下面的按鈕只用來確認這些路徑仍是 501，不會寫入 Notion。</p>
+        <button class="ghost" type="button" id="probe-write">確認寫回是 501</button>
+        <button class="ghost" type="button" id="probe-svg">確認時程 SVG 是 501</button>
+        <button class="ghost" type="button" id="probe-pptx">確認期程 PPTX 是 501</button>
+        <pre id="probe-out">尚未呼叫。</pre>
+      </div>
+    </div>
+
+    <section class="panel">
+      <h2>案件資料夾</h2>
+      <p class="lede">掃描使用環境裡的 <code>RAG_CASES_ROOT</code>。沒設定就會直接說明，不會顯示空的成功清單。內建示範樹在這個專案裡，不需要 D:。</p>
+      <button type="button" id="scan">掃描 CASES_ROOT</button>
+      <button type="button" id="scan-demo">掃描內建示範樹</button>
+      <pre id="scan-out">尚未掃描。</pre>
+    </section>
+
+    <section class="panel">
+      <h2>示範分析與提問</h2>
+      <p class="lede">使用專案內的合成案件文字，不讀 Ken 的 D:。案件名稱與 Page ID 可以改。模板 block id 是假的。</p>
+      <label>案件名稱 <input id="case-name" type="text" value="示範市都更案"></label>
+      <label>Page ID <input id="page-id" type="text" value="page_demo_0001"></label>
+      <button type="button" id="analyze">分析成 Notion JSON</button>
+      <pre id="analyze-out">尚未分析。</pre>
+      <label>問題 <input id="question" type="text" value="投資金額是多少？"></label>
+      <button type="button" id="ask">建立示範索引並提問</button>
+      <pre id="ask-out">尚未提問。這條是抽取式問答，不呼叫 Ollama。</pre>
+    </section>
+
+    <section class="panel">
+      <h2>招標完成頁研究</h2>
+      <p class="lede">可用，但不會自己搜尋。貼一個允許抓取的公開網址才會送出。留空就不會連外。</p>
+      <label>案名 <input id="research-name" type="text" value="示範完成案"></label>
+      <label>公開網址 <input id="research-url" type="text" placeholder="https://"></label>
+      <button type="button" id="research">研究這個網址</button>
+      <pre id="research-out">尚未研究。</pre>
+    </section>
+    <footer>API 文件在 <a href="/docs">/docs</a>。同一頁也在 <a href="/ui">/ui</a>。</footer>
+  </main>
+  <script>
+    const demo = { pdfText: "", templateBlocks: [], queryText: "", demoRoot: "" };
+
+    function chip(title, value, on) {
+      return `<div class="chip ${on ? "on" : "off"}"><b>${title}</b>${value}</div>`;
+    }
+
+    function showRootNote(status) {
+      const note = document.getElementById("root-note");
+      if (!status.cases_root_set) {
+        note.hidden = false;
+        note.textContent = "尚未設定 RAG_CASES_ROOT。請在電腦 A 指到 D:\\…\\招商案件。雲端機器讀不到那顆磁碟，請改按「掃描內建示範樹」。";
+        return;
+      }
+      if (!status.cases_root_exists) {
+        note.hidden = false;
+        note.textContent = "RAG_CASES_ROOT 有設，但目前不是看得到的資料夾：" + status.cases_root;
+        return;
+      }
+      note.hidden = true;
+    }
+
+    async function loadStatus() {
+      const box = document.getElementById("env");
+      try {
+        const res = await fetch("/api/ui/status");
+        const status = await res.json();
+        box.innerHTML = [
+          chip("CASES_ROOT", status.cases_root_set ? "已設定" : "未設定", status.cases_root_set && status.cases_root_exists),
+          chip("LLM URL", status.llm_base_url_set ? "已設定" : "未設定", status.llm_base_url_set),
+          chip("LLM 模型", status.llm_model_set ? "已設定" : "未設定", status.llm_model_set),
+          chip("Ollama 連線", status.local_llm_enabled ? "已接上" : "未接上（抽取式）", status.local_llm_enabled),
+          chip("OCR", status.ocr_available ? "可用" : "未安裝", status.ocr_available),
+          chip("分析模式", status.analysis_mode, true),
+        ].join("");
+        if (status.cases_root_set) {
+          box.insertAdjacentHTML("beforeend", chip("資料夾路徑", status.cases_root || "—", status.cases_root_exists));
+        }
+        if (status.llm_base_url_set) {
+          box.insertAdjacentHTML("beforeend", chip("LLM 位址", status.llm_base_url, true));
+        }
+        showRootNote(status);
+      } catch (error) {
+        box.textContent = "讀不到 /api/ui/status：" + error;
+      }
+    }
+
+    function explainScan(status, body) {
+      const detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail || body);
+      if (detail.includes("not set")) {
+        return "尚未設定 RAG_CASES_ROOT。電腦 A 才放 D:\\…\\招商案件。這台若是雲端，讀不到那顆磁碟。";
+      }
+      if (detail.includes("not a directory")) {
+        return "RAG_CASES_ROOT 不是資料夾。\n" + detail;
+      }
+      return "掃描失敗（" + status + "）\n" + detail;
+    }
+
+    function formatCases(payload) {
+      const cases = payload.cases || [];
+      if (!cases.length) return "這個資料夾底下沒有案件。";
+      return cases.map((item) => {
+        const docs = (item.documents || []).map((doc) => doc.filename + "（" + doc.doc_kind + "）").join("、") || "沒有 PDF/txt";
+        return item.case_type + " / " + item.city + " / " + item.case_name + "\n  " + docs;
+      }).join("\n\n");
+    }
+
+    async function scan(root) {
+      const out = document.getElementById("scan-out");
+      out.textContent = "掃描中…";
+      const res = await fetch("/api/pipeline/detect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ root: root || "" }),
+      });
+      const body = await res.json();
+      out.textContent = res.ok ? formatCases(body) : explainScan(res.status, body);
+    }
+
+    async function loadDemo() {
+      const res = await fetch("/api/ui/demo");
+      if (!res.ok) {
+        document.getElementById("analyze-out").textContent = "讀不到內建示範。";
+        return;
+      }
+      Object.assign(demo, await res.json());
+      document.getElementById("case-name").value = demo.caseName || "示範市都更案";
+      document.getElementById("page-id").value = demo.pageId || "page_demo_0001";
+      if (demo.question) document.getElementById("question").value = demo.question;
+    }
+
+    async function analyze() {
+      const out = document.getElementById("analyze-out");
+      const caseName = document.getElementById("case-name").value.trim();
+      const pageId = document.getElementById("page-id").value.trim();
+      if (!caseName || !pageId) {
+        out.textContent = "請填案件名稱與 Page ID。";
+        return;
+      }
+      out.textContent = "分析中…";
+      const res = await fetch("/api/notion/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          caseName,
+          pageId,
+          pdfText: demo.pdfText,
+          templateBlocks: demo.templateBlocks,
+        }),
+      });
+      const body = await res.json();
+      out.textContent = JSON.stringify(body, null, 2);
+    }
+
+    async function ask() {
+      const out = document.getElementById("ask-out");
+      const question = document.getElementById("question").value.trim();
+      const caseName = document.getElementById("case-name").value.trim() || "示範提問";
+      if (!question) {
+        out.textContent = "請填問題。";
+        return;
+      }
+      out.textContent = "建立示範索引…";
+      const created = await fetch("/api/cases", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: caseName, description: "狀態頁示範，不是 D: 上的案件" }),
+      });
+      const caseBody = await created.json();
+      if (!created.ok) {
+        out.textContent = JSON.stringify(caseBody, null, 2);
+        return;
+      }
+      const ingested = await fetch("/api/cases/" + caseBody.id + "/texts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: "示範問答", text: demo.queryText }),
+      });
+      if (!ingested.ok) {
+        out.textContent = JSON.stringify(await ingested.json(), null, 2);
+        return;
+      }
+      const queried = await fetch("/api/cases/" + caseBody.id + "/query", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question }),
+      });
+      const answer = await queried.json();
+      out.textContent = "模式：" + (answer.mode || "") + "\n" + (answer.answer || JSON.stringify(answer, null, 2));
+    }
+
+    async function research() {
+      const out = document.getElementById("research-out");
+      const url = document.getElementById("research-url").value.trim();
+      const name = document.getElementById("research-name").value.trim();
+      if (!url) {
+        out.textContent = "請貼上允許抓取的公開網址。留空不會連外，也不會自己搜尋。";
+        return;
+      }
+      out.textContent = "抓取中…";
+      const res = await fetch("/api/completed/research", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ case_name: name, source_urls: [url], delay_seconds: 0 }),
+      });
+      out.textContent = JSON.stringify(await res.json(), null, 2);
+    }
+
+    async function probe(path) {
+      const out = document.getElementById("probe-out");
+      const res = await fetch(path, { method: "POST" });
+      const body = await res.json();
+      out.textContent = "HTTP " + res.status + "\n" + JSON.stringify(body, null, 2);
+    }
+
+    document.getElementById("scan").addEventListener("click", () => scan(""));
+    document.getElementById("scan-demo").addEventListener("click", () => scan(demo.demoRoot));
+    document.getElementById("analyze").addEventListener("click", analyze);
+    document.getElementById("ask").addEventListener("click", ask);
+    document.getElementById("research").addEventListener("click", research);
+    document.getElementById("probe-write").addEventListener("click", () => probe("/api/pipeline/notion/write"));
+    document.getElementById("probe-svg").addEventListener("click", () => probe("/api/pipeline/schedule/svg"));
+    document.getElementById("probe-pptx").addEventListener("click", () => probe("/api/pipeline/schedule/pptx"));
+    loadStatus();
+    loadDemo();
+  </script>
+</body>
+</html>
