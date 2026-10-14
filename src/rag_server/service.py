@@ -85,6 +85,11 @@ def _with_overview(item: dict, overview_by_id: dict[str, str]) -> dict:
     return {**item, "overview": overview}
 
 
+def _with_headings(item: dict, headings_by_id: dict[str, list[str]]) -> dict:
+    headings = headings_by_id.get(str(item.get("notion_page_id") or ""), [])
+    return {**item, "headings": headings}
+
+
 def _classify_folders(open_pages: list[CompletedCase], completed_pages: list[CompletedCase], folders: list) -> dict:
     paired = pair_notion_pages_to_folders(open_pages, folders)
     used = {item["source_path"] for item in paired["matched"]}
@@ -492,19 +497,21 @@ class CaseService:
         )
 
     def list_unfilled_notion_cases(self, root: str = "") -> dict:
-        """List in-progress pages whose ❯計畫概述 does not yet describe the case.
+        """List in-progress pages the server can fill after 案件介紹範本 is applied.
 
-        Applying the template does not count as content. A page is left out of
-        the write list only when that section has case prose. 招標完成 pages
-        are not read. This does not update Notion.
+        招標完成 pages are not read and do not need that template. A page with
+        no ❯計畫概述 still needs the template; it is listed separately and is
+        not written. Template hint text is not case content. This does not
+        update Notion.
         """
         open_pages, _completed, folders, _root = self._pages_and_folders(root)
         token = self.settings.notion_token.strip()
         filled: list[dict] = []
-        missing_heading: list[dict] = []
         errors: list[dict] = []
         unfilled_pages: list[CompletedCase] = []
+        needs_template: list[CompletedCase] = []
         overview_by_id: dict[str, str] = {}
+        headings_by_id: dict[str, list[str]] = {}
         intro_skipped = 0
         with httpx.Client(timeout=30.0) as http:
             for page in open_pages:
@@ -524,11 +531,15 @@ class CaseService:
                 if state == "filled":
                     filled.append(_unfilled_page_row(page) | {"excerpt": reading["excerpt"]})
                 elif state == "missing_heading":
-                    missing_heading.append(_unfilled_page_row(page) | {"headings": reading["headings"]})
+                    headings_by_id[page.notion_page_id] = list(reading["headings"])
+                    needs_template.append(page)
                 else:
                     overview_by_id[page.notion_page_id] = state
                     unfilled_pages.append(page)
         paired = pair_notion_pages_to_folders(unfilled_pages, folders)
+        used = {item["source_path"] for item in paired["matched"]}
+        remaining = [folder for folder in folders if str(folder.folder) not in used]
+        template_paired = pair_notion_pages_to_folders(needs_template, remaining)
         return {
             "unfilled_matched": [
                 _with_overview(item, overview_by_id) for item in paired["matched"]
@@ -537,7 +548,10 @@ class CaseService:
                 _with_overview(item, overview_by_id) for item in paired["notion_without_folder"]
             ],
             "filled": filled,
-            "missing_heading": missing_heading,
+            "missing_heading": [
+                _with_headings(item, headings_by_id)
+                for item in template_paired["matched"] + template_paired["notion_without_folder"]
+            ],
             "intro_skipped": intro_skipped,
             "errors": errors,
         }

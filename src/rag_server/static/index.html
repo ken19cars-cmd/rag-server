@@ -157,7 +157,7 @@
         <article>
           <h3>未完成頁對上資料夾</h3>
           <p><code>GET /api/pipeline/local-match</code>。進行中的頁先對頁名，再對地號，再把少寫的縣、市補上。招標完成的頁另外列出。這個對照不改資料夾名稱，也不把分析內容寫進頁面。</p>
-          <p><code>GET /api/pipeline/unfilled</code>。進行中的頁再讀 blocks，欄位和折疊裡的標題也算。❯計畫概述底下要有這個案子自己的文字，才算已填。套用範本、或概述只有頁名，都算還沒填。已經寫了的頁會附上那段概述。不更新 Notion。</p>
+          <p><code>GET /api/pipeline/unfilled</code>。只看進行中的頁。招標完成不必套案件介紹範本，不在這一份。進行中的頁要先有 ❯計畫概述這類標題，伺服器才照標題下面填。還沒套用範本的頁會另列。概述只有範本或頁名，算還沒填。已經寫了本案內容的頁會附上那段概述。不更新 Notion。</p>
         </article>
         <article>
           <h3>PDF 寫入與合併</h3>
@@ -403,7 +403,7 @@
 
     function formatUnfilled(payload) {
       const lines = [];
-      lines.push("這個按鈕只列出還沒寫本案內容的頁，不寫入 Notion。套用範本不算有內容。");
+      lines.push("進行中的頁要先套上案件介紹範本。這個按鈕列出標題下面還沒寫本案內容的頁，不寫入 Notion。套用範本不算有內容。招標完成不必套這個範本，沒有列在這裡。");
       lines.push("");
       const matched = payload.unfilled_matched || [];
       lines.push("還沒填，已對上資料夾 " + matched.length + " 件");
@@ -434,16 +434,25 @@
         if (item.excerpt) lines.push("  概述：" + item.excerpt);
       });
       const missingHeading = payload.missing_heading || [];
-      if (missingHeading.length) {
-        lines.push("");
-        lines.push("沒有 ❯計畫概述 " + missingHeading.length + " 件");
-        missingHeading.forEach((item) => {
-          lines.push((item.status || "未填招商情形") + " / " + item.case_name);
-          const heads = item.headings || [];
-          if (heads.length) lines.push("  讀到的標題：" + heads.join("、"));
-          else lines.push("  最外層沒有標題。");
-        });
-      }
+      lines.push("");
+      lines.push("還沒套用案件介紹範本 " + missingHeading.length + " 件");
+      lines.push("這些是進行中的頁，Notion 裡還沒有 ❯計畫概述。請先套用案件介紹範本。套好之後再按一次，伺服器才照標題把資料填進去。招標完成不必套這個範本，所以沒有列在這裡。");
+      missingHeading.forEach((item) => {
+        lines.push((item.status || "未填招商情形") + " / " + item.case_name);
+        if (item.folder_name) {
+          lines.push("  資料夾：" + item.folder_name);
+          lines.push("  " + item.case_type + " / " + (item.city || "沒有縣市層"));
+        } else {
+          const near = item.near_folders || [];
+          if (!near.length) lines.push("  掃描沒有看到相近的資料夾。");
+          near.forEach((folder) => {
+            lines.push("  掃到：" + folder.case_type + " / " + (folder.city || "沒有縣市層") + " / " + folder.case_name);
+          });
+        }
+        const heads = item.headings || [];
+        if (heads.length) lines.push("  讀到的標題：" + heads.join("、"));
+        else lines.push("  最外層沒有標題。");
+      });
       if (payload.intro_skipped) {
         lines.push("");
         lines.push("案件介紹不是案件頁，略過。");

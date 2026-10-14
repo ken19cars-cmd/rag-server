@@ -151,6 +151,9 @@ def test_unfilled_route_lists_blank_pages_and_skips_filled_ones(tmp_path: Path, 
     blank = root / "1.都市更新" / "00示範市" / "示範空白案"
     blank.mkdir(parents=True)
     (blank / "申請須知.txt").write_text("計畫概述：這是空白頁要對上的文字", encoding="utf-8")
+    bare = root / "1.都市更新" / "00示範市" / "示範沒套範本"
+    bare.mkdir(parents=True)
+    (bare / "申請須知.txt").write_text("還沒套範本", encoding="utf-8")
     blocks = {
         "page-blank": [_heading("❯計畫概述"), _paragraph("")],
         "page-filled": [_heading("❯計畫概述"), _paragraph("已經寫過。")],
@@ -162,6 +165,7 @@ def test_unfilled_route_lists_blank_pages_and_skips_filled_ones(tmp_path: Path, 
         ],
         "page-orphan": [_heading("❯計畫概述"), _paragraph("")],
         "page-no-heading": [_heading("❯其他", "h-other"), _paragraph("不是概述")],
+        "page-no-template": [_heading("❯基地基本資料", "h-base")],
         "page-broken": [_heading("❯計畫概述")],
         "page-title": [_heading("❯計畫概述"), _paragraph("頁名就是概述的案")],
     }
@@ -175,6 +179,7 @@ def test_unfilled_route_lists_blank_pages_and_skips_filled_ones(tmp_path: Path, 
                 _page("page-template", "只有範本提示的案", "前置作業"),
                 _page("page-orphan", "沒有資料夾的空白案", "進行中"),
                 _page("page-no-heading", "沒有概述標題", "前置作業"),
+                _page("page-no-template", "示範沒套範本", "前置作業"),
                 _page("page-broken", "標題下沒有段落", "前置作業"),
                 _page("page-title", "頁名就是概述的案", "前置作業"),
                 _page("page-intro", "案件介紹", "公告中"),
@@ -220,8 +225,11 @@ def test_unfilled_route_lists_blank_pages_and_skips_filled_ones(tmp_path: Path, 
     assert body["unfilled_without_folder"][3]["overview"] == "template"
     assert [item["case_name"] for item in body["filled"]] == ["已經填過的案"]
     assert body["filled"][0]["excerpt"] == "已經寫過。"
-    assert [item["case_name"] for item in body["missing_heading"]] == ["沒有概述標題"]
-    assert body["missing_heading"][0]["headings"] == ["❯其他"]
+    assert [item["case_name"] for item in body["missing_heading"]] == ["示範沒套範本", "沒有概述標題"]
+    assert body["missing_heading"][0]["folder_name"] == "示範沒套範本"
+    assert body["missing_heading"][0]["headings"] == ["❯基地基本資料"]
+    assert body["missing_heading"][1]["headings"] == ["❯其他"]
+    assert "招標完成案" not in [item["case_name"] for item in body["missing_heading"]]
     assert body["intro_skipped"] == 1
     assert body["errors"] == []
     assert "page-done" not in seen_blocks
