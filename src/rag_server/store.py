@@ -299,6 +299,53 @@ class CaseStore:
             ).fetchall()
         return [_row_to_chunk(row) for row in rows]
 
+    def rewrite_case_directory(self, old_dirs: list[Path], new_dir: Path, new_name: str) -> None:
+        """Point indexed case and document paths at a renamed case folder."""
+        old_texts: set[str] = set()
+        for old_dir in old_dirs:
+            old_texts.update(_path_texts(old_dir))
+        new_text = str(new_dir)
+        with self._lock:
+            case_rows = self.connection.execute("SELECT id, source_path FROM cases").fetchall()
+            for row in case_rows:
+                if row["source_path"] not in old_texts:
+                    continue
+                self.connection.execute(
+                    "UPDATE cases SET source_path = ?, name = ? WHERE id = ?",
+                    (new_text, new_name, row["id"]),
+                )
+            document_rows = self.connection.execute(
+                "SELECT id, source_path FROM documents"
+            ).fetchall()
+            for row in document_rows:
+                updated = _replace_path_prefix(row["source_path"], old_texts, new_text)
+                if updated is None or updated == row["source_path"]:
+                    continue
+                self.connection.execute(
+                    "UPDATE documents SET source_path = ? WHERE id = ?",
+                    (updated, row["id"]),
+                )
+            self.connection.commit()
+
+
+def _path_texts(path: Path) -> set[str]:
+    raw = str(path).rstrip("\\/")
+    return {raw, raw.replace("\\", "/"), raw.replace("/", "\\")}
+
+
+def _replace_path_prefix(value: str, old_texts: set[str], new_text: str) -> str | None:
+    joiner = "\\" if "\\" in new_text else "/"
+    new_root = new_text.rstrip("\\/")
+    for old in old_texts:
+        if value == old:
+            return new_root
+        for separator in ("/", "\\"):
+            prefix = old.rstrip("/\\") + separator
+            if value.startswith(prefix):
+                suffix = value[len(prefix) :].replace("/", joiner).replace("\\", joiner)
+                return new_root + joiner + suffix
+    return None
+
 
 def _row_to_chunk(row: sqlite3.Row) -> ChunkRecord:
     return ChunkRecord(

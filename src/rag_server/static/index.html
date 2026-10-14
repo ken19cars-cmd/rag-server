@@ -156,7 +156,7 @@
         </article>
         <article>
           <h3>未完成頁對上資料夾</h3>
-          <p><code>GET /api/pipeline/local-match</code>。只查 Notion 裡不是「招標完成」的頁，用頁名對案件夾。不寫入 Notion。</p>
+          <p><code>GET /api/pipeline/local-match</code>。不是「招標完成」的頁，先對頁名，再對縣市、行政區、地段、地號。<code>POST /api/pipeline/local-match/rename</code> 把對上的資料夾改成 Notion 案名。不寫入 Notion。</p>
         </article>
         <article>
           <h3>PDF 寫入與合併</h3>
@@ -215,10 +215,11 @@
 
     <section class="panel">
       <h2>案件資料夾</h2>
-      <p class="lede">掃描使用環境裡的 <code>RAG_CASES_ROOT</code>。沒設定就會直接說明，不會顯示空的成功清單。內建示範樹在這個專案裡，不需要 D:。「對上本地案件」只讀不是「招標完成」的 Notion 頁，用頁名對資料夾，不會寫回 Notion。</p>
+      <p class="lede">掃描使用環境裡的 <code>RAG_CASES_ROOT</code>。沒設定就會直接說明，不會顯示空的成功清單。內建示範樹在這個專案裡，不需要 D:。「對上本地案件」只讀不是「招標完成」的 Notion 頁。頁名不同時，縣市、行政區、地段、地號相同也算同一案。「改成 Notion 案名」會在電腦 A 把那些資料夾改名，不會寫回 Notion。</p>
       <button type="button" id="scan">掃描 CASES_ROOT</button>
       <button type="button" id="scan-demo">掃描內建示範樹</button>
       <button type="button" id="local-match">對上本地案件</button>
+      <button type="button" id="rename-folders">改成 Notion 案名</button>
       <pre id="scan-out">尚未掃描。</pre>
     </section>
 
@@ -328,11 +329,34 @@
 
     function formatMatch(payload) {
       const lines = [];
+      if (payload.renamed) {
+        lines.push("已把 " + payload.renamed.length + " 個資料夾改成 Notion 案名");
+        (payload.renamed || []).forEach((item) => {
+          lines.push(item.from_name + " → " + item.to_name);
+        });
+        lines.push("");
+      }
+      if (payload.skipped && payload.skipped.length) {
+        lines.push("沒改成 " + payload.skipped.length + " 件");
+        payload.skipped.forEach((item) => {
+          lines.push(item.from_name + " → " + item.to_name + "（" + item.reason + "）");
+        });
+        lines.push("");
+      }
+      const renames = payload.renames || [];
+      lines.push("可改成 Notion 案名 " + renames.length + " 件");
+      renames.forEach((item) => {
+        const how = item.matched_by === "land" ? "地號" : "頁名";
+        lines.push("（" + how + "）" + item.from_name + " → " + item.to_name);
+      });
+      lines.push("");
       const matched = payload.matched || [];
       lines.push("對上 " + matched.length + " 件（尚未寫入 Notion）");
       matched.forEach((item) => {
         const docs = (item.documents || []).map((doc) => doc.filename + "（" + doc.doc_kind + "）").join("、") || "沒有 PDF/txt";
-        lines.push(item.status + " / " + item.case_name + " → " + item.folder_name);
+        const how = item.matched_by === "land" ? "地號" : "頁名";
+        lines.push("（" + how + "）" + item.status + " / " + item.case_name);
+        lines.push("  資料夾：" + item.folder_name);
         lines.push("  " + item.case_type + " / " + item.city);
         lines.push("  " + docs);
       });
@@ -355,6 +379,14 @@
       const out = document.getElementById("scan-out");
       out.textContent = "對照中…";
       const res = await fetch("/api/pipeline/local-match");
+      const body = await res.json();
+      out.textContent = res.ok ? formatMatch(body) : explainScan(res.status, body);
+    }
+
+    async function renameLocal() {
+      const out = document.getElementById("scan-out");
+      out.textContent = "改名中…";
+      const res = await fetch("/api/pipeline/local-match/rename", { method: "POST" });
       const body = await res.json();
       out.textContent = res.ok ? formatMatch(body) : explainScan(res.status, body);
     }
@@ -458,6 +490,7 @@
     document.getElementById("scan").addEventListener("click", () => scan(""));
     document.getElementById("scan-demo").addEventListener("click", () => scan(demo.demoRoot));
     document.getElementById("local-match").addEventListener("click", matchLocal);
+    document.getElementById("rename-folders").addEventListener("click", renameLocal);
     document.getElementById("analyze").addEventListener("click", analyze);
     document.getElementById("ask").addEventListener("click", ask);
     document.getElementById("research").addEventListener("click", research);

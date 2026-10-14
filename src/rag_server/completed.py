@@ -203,12 +203,145 @@ def case_match_key(name: str) -> str:
     return re.sub(r"\s+", "", folded).casefold()
 
 
-def pair_notion_pages_to_folders(pages: list[CompletedCase], folders: list) -> dict:
-    """Pair open Notion pages to local case folders by normalized name.
+_CITIES = (
+    "臺北市",
+    "新北市",
+    "桃園市",
+    "臺中市",
+    "臺南市",
+    "高雄市",
+    "基隆市",
+    "新竹市",
+    "嘉義市",
+    "新竹縣",
+    "苗栗縣",
+    "彰化縣",
+    "南投縣",
+    "雲林縣",
+    "嘉義縣",
+    "屏東縣",
+    "宜蘭縣",
+    "花蓮縣",
+    "臺東縣",
+    "澎湖縣",
+    "金門縣",
+    "連江縣",
+)
+_CITY_RE = re.compile("|".join(_CITIES))
+_DISTRICT_RE = re.compile(r"(\D{1,8}?[區鄉鎮市])")
+_SECTION_RE = re.compile(r"(\D+?段(?:[0-9一二三四五六七八九十]+小段)?)")
+_PARCEL_RE = re.compile(r"(\d+(?:[-之]\d+)?)地號(?:等([0-9一二三四五六七八九十]+)筆)?")
+_LEADING_TAG = re.compile(r"^[〈【\[（(][^〉】\]）)]{0,24}[〉】\]）)]")
+_PAREN = re.compile(r"[（(]([^（）()]*)[）)]")
+_FORBIDDEN_FOLDER_CHARS = set('<>:"/\\|?*')
+_RESERVED_FOLDER_NAMES = {"CON", "PRN", "AUX", "NUL"} | {f"COM{i}" for i in range(1, 10)} | {
+    f"LPT{i}" for i in range(1, 10)
+}
+_CN_DIGIT = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
 
-    A pair is kept only when exactly one page and one folder share the key.
-    Collisions stay in the unmatched lists so a later write cannot pick the
-    wrong page. ``folders`` are corpus cases from ``scan_cases_root``.
+
+def _cn_to_int(text: str) -> str:
+    if text.isdigit():
+        return str(int(text))
+    if text == "十":
+        return "10"
+    if len(text) == 1 and text in _CN_DIGIT:
+        return str(_CN_DIGIT[text])
+    if len(text) == 2 and text[0] == "十" and text[1] in _CN_DIGIT:
+        return str(10 + _CN_DIGIT[text[1]])
+    if len(text) == 2 and text[1] == "十" and text[0] in _CN_DIGIT:
+        return str(_CN_DIGIT[text[0]] * 10)
+    if len(text) == 3 and text[1] == "十" and text[0] in _CN_DIGIT and text[2] in _CN_DIGIT:
+        return str(_CN_DIGIT[text[0]] * 10 + _CN_DIGIT[text[2]])
+    return text
+
+
+def _prepare_land_text(name: str) -> str:
+    text = unicodedata.normalize("NFKC", name).translate(_DASHES).replace("台", "臺")
+    text = re.sub(r"\s+", "", text)
+    while True:
+        stripped = _LEADING_TAG.sub("", text, count=1)
+        if stripped == text:
+            break
+        text = stripped
+
+    def _drop_aside(match: re.Match[str]) -> str:
+        inner = match.group(1)
+        if "段" in inner or "地號" in inner:
+            return match.group(0)
+        return ""
+
+    return _PAREN.sub(_drop_aside, text)
+
+
+def land_identity(name: str, city: str = "") -> tuple[str, str, str, str, str] | None:
+    """縣市、行政區、地段、地號, plus 等N筆 when the name states a count.
+
+    A leading tag such as ``〈信義〉`` and a parenthetical aside such as
+    ``(產專2-32)`` are ignored. Names without a cadastral parcel return None.
+    """
+    text = _prepare_land_text(name)
+    city_match = _CITY_RE.search(text)
+    if city_match:
+        found_city = city_match.group(0)
+        rest = text[city_match.end() :]
+    else:
+        fallback = _CITY_RE.search(_prepare_land_text(city))
+        if fallback is None:
+            return None
+        found_city = fallback.group(0)
+        rest = text
+    district_match = _DISTRICT_RE.match(rest)
+    if district_match is None:
+        return None
+    rest = rest[district_match.end() :]
+    section_match = _SECTION_RE.match(rest)
+    if section_match is None:
+        return None
+    section = re.sub(
+        r"([0-9一二三四五六七八九十]+)小段",
+        lambda match: _cn_to_int(match.group(1)) + "小段",
+        section_match.group(1),
+    )
+    parcel_match = _PARCEL_RE.search(text)
+    if parcel_match is None:
+        return None
+    parcel = parcel_match.group(1).replace("之", "-")
+    count = _cn_to_int(parcel_match.group(2)) if parcel_match.group(2) else ""
+    return (found_city, district_match.group(1), section, parcel, count)
+
+
+def _same_land(
+    left: tuple[str, str, str, str, str] | None,
+    right: tuple[str, str, str, str, str] | None,
+) -> bool:
+    if left is None or right is None:
+        return False
+    if left[:4] != right[:4]:
+        return False
+    return not left[4] or not right[4] or left[4] == right[4]
+
+
+def windows_folder_name(name: str) -> str | None:
+    """Return a Windows directory name, or None when the Notion title cannot be one."""
+    cleaned = name.strip()
+    if not cleaned or cleaned.endswith(".") or cleaned.endswith(" "):
+        return None
+    if any(ord(char) < 32 or char in _FORBIDDEN_FOLDER_CHARS for char in cleaned):
+        return None
+    if cleaned.split(".", 1)[0].upper() in _RESERVED_FOLDER_NAMES:
+        return None
+    return cleaned
+
+
+def pair_notion_pages_to_folders(pages: list[CompletedCase], folders: list) -> dict:
+    """Pair open Notion pages to local case folders.
+
+    A normalized title pairs first, and only when exactly one page and one
+    folder share it. Pages and folders still left over pair when 縣市、行政區、
+    地段、地號 are the same, again only when that land is unique. The Notion
+    title is the name a folder should have; ``renames`` lists pairs whose
+    folder name still differs.
     """
     folders_by_key: dict[str, list] = {}
     for folder in folders:
@@ -219,26 +352,68 @@ def pair_notion_pages_to_folders(pages: list[CompletedCase], folders: list) -> d
         pages_by_key.setdefault(case_match_key(page.case_name), []).append(page)
 
     matched: list[dict] = []
-    notion_without_folder: list[dict] = []
     used_folder_ids: set[int] = set()
+    used_page_ids: set[int] = set()
     for page in pages:
         key = case_match_key(page.case_name)
         page_group = pages_by_key[key]
         folder_group = folders_by_key.get(key) or []
         if len(page_group) == 1 and len(folder_group) == 1:
             folder = folder_group[0]
-            matched.append(_matched_row(page, folder))
+            matched.append(_matched_row(page, folder, "name"))
             used_folder_ids.add(id(folder))
-        else:
-            notion_without_folder.append(_notion_only_row(page))
+            used_page_ids.add(id(page))
 
-    folder_without_notion = [
-        _folder_only_row(folder) for folder in folders if id(folder) not in used_folder_ids
-    ]
+    remaining_pages = [page for page in pages if id(page) not in used_page_ids]
+    remaining_folders = [folder for folder in folders if id(folder) not in used_folder_ids]
+    page_land = {id(page): land_identity(page.case_name, page.city) for page in remaining_pages}
+    folder_land = {
+        id(folder): land_identity(folder.case_name, folder.city) for folder in remaining_folders
+    }
+    for page in remaining_pages:
+        compatible = [
+            folder
+            for folder in remaining_folders
+            if id(folder) not in used_folder_ids
+            and _same_land(page_land[id(page)], folder_land[id(folder)])
+        ]
+        if len(compatible) != 1:
+            continue
+        folder = compatible[0]
+        reverse = [
+            other
+            for other in remaining_pages
+            if id(other) not in used_page_ids and _same_land(page_land[id(other)], folder_land[id(folder)])
+        ]
+        if len(reverse) != 1:
+            continue
+        matched.append(_matched_row(page, folder, "land"))
+        used_folder_ids.add(id(folder))
+        used_page_ids.add(id(page))
+
+    renames = []
+    for item in matched:
+        target = windows_folder_name(item["case_name"]) or item["case_name"]
+        if item["folder_name"] == target:
+            continue
+        renames.append(
+            {
+                "from_name": item["folder_name"],
+                "to_name": target,
+                "source_path": item["source_path"],
+                "notion_page_id": item["notion_page_id"],
+                "matched_by": item["matched_by"],
+            }
+        )
     return {
         "matched": matched,
-        "notion_without_folder": notion_without_folder,
-        "folder_without_notion": folder_without_notion,
+        "notion_without_folder": [
+            _notion_only_row(page) for page in pages if id(page) not in used_page_ids
+        ],
+        "folder_without_notion": [
+            _folder_only_row(folder) for folder in folders if id(folder) not in used_folder_ids
+        ],
+        "renames": renames,
     }
 
 
@@ -254,7 +429,7 @@ def _document_rows(documents: list) -> list[dict]:
     ]
 
 
-def _matched_row(page: CompletedCase, folder) -> dict:
+def _matched_row(page: CompletedCase, folder, matched_by: str) -> dict:
     return {
         "case_name": page.case_name,
         "folder_name": folder.case_name,
@@ -264,6 +439,7 @@ def _matched_row(page: CompletedCase, folder) -> dict:
         "case_type": folder.case_type,
         "source_path": str(folder.folder),
         "documents": _document_rows(folder.documents),
+        "matched_by": matched_by,
     }
 
 

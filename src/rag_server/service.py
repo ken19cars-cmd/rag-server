@@ -17,6 +17,7 @@ from rag_server.completed import (
     load_case_file,
     pair_notion_pages_to_folders,
     research_case,
+    windows_folder_name,
 )
 from rag_server.config import Settings
 from rag_server.corpus import CorpusCase, merge_document_texts, scan_cases_root
@@ -441,6 +442,25 @@ class CaseService:
 
     def match_open_notion_cases(self, root: str = "") -> dict:
         """Pair Notion pages that are not 招標完成 with local case folders."""
+        pages, folders, _root = self._open_pages_and_folders(root)
+        return pair_notion_pages_to_folders(pages, folders)
+
+    def rename_open_case_folders(self, root: str = "") -> dict:
+        """Rename uniquely matched case folders to the Notion page title.
+
+        招標完成 pages are not in this set. A folder is renamed only when the
+        pairing is one page to one folder, and the new name stays inside
+        CASES_ROOT. This does not write Notion.
+        """
+        pages, folders, root_path = self._open_pages_and_folders(root)
+        paired = pair_notion_pages_to_folders(pages, folders)
+        renamed, skipped = self._rename_paired_folders(paired["renames"], root_path)
+        result = pair_notion_pages_to_folders(pages, scan_cases_root(root_path))
+        result["renamed"] = renamed
+        result["skipped"] = skipped
+        return result
+
+    def _open_pages_and_folders(self, root: str):
         token = self.settings.notion_token.strip()
         database_id = self.settings.notion_database_id.strip()
         if not token or not database_id:
@@ -454,8 +474,51 @@ class CaseService:
         except RuntimeError as exc:
             raise IngestError(str(exc)) from exc
         pages = cases_from_notion_query(payload, completed_only=False)
-        folders = scan_cases_root(self._cases_root(root))
-        return pair_notion_pages_to_folders(pages, folders)
+        root_path = self._cases_root(root).resolve()
+        return pages, scan_cases_root(root_path), root_path
+
+    def _rename_paired_folders(self, renames: list[dict], root_path: Path) -> tuple[list[dict], list[dict]]:
+        renamed: list[dict] = []
+        skipped: list[dict] = []
+        for item in renames:
+            target_name = windows_folder_name(item["to_name"])
+            if target_name is None:
+                skipped.append({**item, "reason": "Notion 案名含有 Windows 不能當資料夾名稱的字元"})
+                continue
+            source = Path(item["source_path"])
+            try:
+                source_resolved = source.resolve()
+            except OSError as exc:
+                skipped.append({**item, "reason": str(exc)})
+                continue
+            if not source_resolved.is_dir() or not source_resolved.is_relative_to(root_path):
+                skipped.append({**item, "reason": "資料夾不在 CASES_ROOT 裡"})
+                continue
+            parents = source_resolved.parents
+            if len(parents) < 3 or parents[2] != root_path:
+                skipped.append({**item, "reason": "只改案件夾，不改上層資料夾"})
+                continue
+            if source_resolved.name == target_name:
+                continue
+            target = source_resolved.parent / target_name
+            if target.exists():
+                skipped.append({**item, "reason": "已經有同名資料夾"})
+                continue
+            try:
+                source_resolved.rename(target)
+            except OSError as exc:
+                skipped.append({**item, "reason": str(exc)})
+                continue
+            self.store.rewrite_case_directory([source, source_resolved], target, target_name)
+            renamed.append(
+                {
+                    "from_name": item["from_name"],
+                    "to_name": target_name,
+                    "source_path": str(target),
+                    "notion_page_id": item.get("notion_page_id", ""),
+                }
+            )
+        return renamed, skipped
 
     def list_completed(self) -> list[CompletedCase]:
         path = self.settings.completed_cases_file.strip()
