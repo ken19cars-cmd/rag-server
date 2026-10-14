@@ -156,7 +156,7 @@
         </article>
         <article>
           <h3>未完成頁對上資料夾</h3>
-          <p><code>GET /api/pipeline/local-match</code>。進行中的頁先對頁名，再對縣市、行政區、地段、地號。招標完成的頁另外列出，有資料夾的不會再寫成「Notion 沒有」。<code>POST /api/pipeline/local-match/rename</code> 只改進行中那一類的資料夾名稱。不寫入 Notion。</p>
+          <p><code>GET /api/pipeline/local-match</code>。進行中的頁先對頁名，再對地號，再把少寫的縣、市補上。招標完成的頁另外列出。<code>POST /api/pipeline/local-match/rename</code> 把對得上、名稱不同的資料夾改成 Notion 案名。不把分析內容寫進頁面。</p>
         </article>
         <article>
           <h3>PDF 寫入與合併</h3>
@@ -215,7 +215,7 @@
 
     <section class="panel">
       <h2>案件資料夾</h2>
-      <p class="lede">掃描使用環境裡的 <code>RAG_CASES_ROOT</code>。沒設定就會直接說明，不會顯示空的成功清單。內建示範樹在這個專案裡，不需要 D:。「對上本地案件」會分成五類：進行中已對上、進行中有頁沒資料夾、招標完成但資料夾也有、招標完成沒資料夾、資料夾有而 Notion 完全沒有。「改成 Notion 案名」只改進行中已對上、名稱還不同的夾，不會寫回 Notion。</p>
+      <p class="lede">掃描使用環境裡的 <code>RAG_CASES_ROOT</code>。沒設定就會直接說明，不會顯示空的成功清單。內建示範樹在這個專案裡，不需要 D:。「對上本地案件」會分成五類：進行中已對上、進行中有頁沒資料夾、招標完成但資料夾也有、招標完成沒資料夾、資料夾有而 Notion 完全沒有。「改成 Notion 案名」把對得上、名稱還不同的資料夾改成 Notion 頁名，包含少寫縣或市的名稱。這一步不把分析內容寫進頁面。</p>
       <button type="button" id="scan">掃描 CASES_ROOT</button>
       <button type="button" id="scan-demo">掃描內建示範樹</button>
       <button type="button" id="local-match">對上本地案件</button>
@@ -345,18 +345,18 @@
       }
       const renames = payload.renames || [];
       lines.push("可改成 Notion 案名 " + renames.length + " 件");
-      lines.push("只含進行中、已經對上、資料夾名稱還和 Notion 不同的案件。");
+      lines.push("按「改成 Notion 案名」才會改資料夾。對得上、名稱不同的都會改，包含少寫的縣、市。不把分析內容寫進頁面。");
       renames.forEach((item) => {
-        const how = item.matched_by === "land" ? "地號" : "頁名";
+        const how = item.matched_by === "land" ? "地號" : (item.matched_by === "admin" ? "縣市" : "頁名");
         lines.push("（" + how + "）" + item.from_name + " → " + item.to_name);
       });
       lines.push("");
       const matched = payload.matched || [];
-      lines.push("進行中，已對上 " + matched.length + " 件（尚未寫入 Notion）");
+      lines.push("進行中，已對上 " + matched.length + " 件");
       lines.push("招商情形不是招標完成，而且對上一個資料夾。");
       matched.forEach((item) => {
         const docs = (item.documents || []).map((doc) => doc.filename + "（" + doc.doc_kind + "）").join("、") || "沒有 PDF/txt";
-        const how = item.matched_by === "land" ? "地號" : "頁名";
+        const how = item.matched_by === "land" ? "地號" : (item.matched_by === "admin" ? "縣市" : "頁名");
         lines.push("（" + how + "）" + (item.status || "未填招商情形") + " / " + item.case_name);
         lines.push("  資料夾：" + item.folder_name);
         lines.push("  " + item.case_type + " / " + item.city);
@@ -374,7 +374,7 @@
       lines.push("招標完成，資料夾也有 " + completedFolders.length + " 件");
       lines.push("Notion 有這一頁，招商情形是招標完成，所以沒有放進「進行中，已對上」。");
       completedFolders.forEach((item) => {
-        const how = item.matched_by === "land" ? "地號相同" : "頁名相同";
+        const how = item.matched_by === "land" ? "地號相同" : (item.matched_by === "admin" ? "縣市相同" : "頁名相同");
         lines.push(item.case_type + " / " + item.city + " / " + item.folder_name);
         lines.push("  Notion：" + item.case_name + "（" + how + "）");
       });

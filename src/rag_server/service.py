@@ -58,6 +58,7 @@ def _classify_folders(open_pages: list[CompletedCase], completed_pages: list[Com
     paired["folder_completed_ambiguous"] = completed["folder_completed_ambiguous"]
     paired["completed_without_folder"] = completed["completed_without_folder"]
     paired["folder_without_notion"] = completed["folder_without_notion"]
+    paired["renames"] = paired["renames"] + completed["renames"]
     return paired
 
 
@@ -460,14 +461,14 @@ class CaseService:
         return _classify_folders(open_pages, completed_pages, folders)
 
     def rename_open_case_folders(self, root: str = "") -> dict:
-        """Rename uniquely matched open-case folders to the Notion page title.
+        """Rename every uniquely paired case folder to the Notion page title.
 
-        招標完成 pages stay in their own list and are not renamed here. A folder
-        is renamed only when the pairing is one open page to one folder, and
-        the new name stays inside CASES_ROOT. This does not write Notion.
+        A folder is renamed when one Notion page pairs to one folder and the
+        names differ, including a missing 縣 or 市. 招標完成 pairs are included.
+        The new name stays inside CASES_ROOT. This does not write page content.
         """
         open_pages, completed_pages, folders, root_path = self._pages_and_folders(root)
-        paired = pair_notion_pages_to_folders(open_pages, folders)
+        paired = _classify_folders(open_pages, completed_pages, folders)
         renamed, skipped = self._rename_paired_folders(paired["renames"], root_path)
         result = _classify_folders(open_pages, completed_pages, scan_cases_root(root_path))
         result["renamed"] = renamed

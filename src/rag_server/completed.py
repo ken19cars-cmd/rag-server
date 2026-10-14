@@ -193,6 +193,22 @@ _DASHES = str.maketrans(
 )
 
 
+def admin_sync_key(name: str) -> str:
+    """Fold a missing 縣 or 市 onto the one official name that stem belongs to.
+
+    ``屏東`` becomes ``屏東縣``. ``嘉義`` is left alone because it could be
+    ``嘉義市`` or ``嘉義縣``. ``新竹`` is left alone for the same reason.
+    """
+    text = case_match_key(name)
+    stems: dict[str, list[str]] = {}
+    for city in _CITIES:
+        stems.setdefault(city[:-1], []).append(city)
+    unique = {stem: names[0] for stem, names in stems.items() if len(names) == 1 and stem}
+    for stem, city in sorted(unique.items(), key=lambda item: len(item[0]), reverse=True):
+        text = re.sub(re.escape(stem) + "(?!" + re.escape(city[-1]) + ")", city, text)
+    return text
+
+
 def case_match_key(name: str) -> str:
     """Fold a Notion title and a case-folder name onto one comparison key.
 
@@ -339,9 +355,10 @@ def pair_notion_pages_to_folders(pages: list[CompletedCase], folders: list) -> d
 
     A normalized title pairs first, and only when exactly one page and one
     folder share it. Pages and folders still left over pair when 縣市、行政區、
-    地段、地號 are the same, again only when that land is unique. The Notion
-    title is the name a folder should have; ``renames`` lists pairs whose
-    folder name still differs.
+    地段、地號 are the same, then when a missing 縣 or 市 is the only gap and
+    that stem belongs to one official name. Each pass keeps a pair only when
+    it is unique. The Notion title is the name a folder should have;
+    ``renames`` lists pairs whose folder name still differs.
     """
     folders_by_key: dict[str, list] = {}
     for folder in folders:
@@ -390,6 +407,26 @@ def pair_notion_pages_to_folders(pages: list[CompletedCase], folders: list) -> d
         matched.append(_matched_row(page, folder, "land"))
         used_folder_ids.add(id(folder))
         used_page_ids.add(id(page))
+
+    remaining_pages = [page for page in pages if id(page) not in used_page_ids]
+    remaining_folders = [folder for folder in folders if id(folder) not in used_folder_ids]
+    pages_by_admin: dict[str, list[CompletedCase]] = {}
+    folders_by_admin: dict[str, list] = {}
+    for page in remaining_pages:
+        pages_by_admin.setdefault(admin_sync_key(page.case_name), []).append(page)
+    for folder in remaining_folders:
+        folders_by_admin.setdefault(admin_sync_key(folder.case_name), []).append(folder)
+    for page in remaining_pages:
+        key = admin_sync_key(page.case_name)
+        if not key:
+            continue
+        page_group = pages_by_admin[key]
+        folder_group = folders_by_admin.get(key) or []
+        if len(page_group) == 1 and len(folder_group) == 1:
+            folder = folder_group[0]
+            matched.append(_matched_row(page, folder, "admin"))
+            used_folder_ids.add(id(folder))
+            used_page_ids.add(id(page))
 
     renames = []
     for item in matched:
@@ -458,16 +495,19 @@ def describe_completed_folders(remaining_folders: list, completed_pages: list[Co
         "folder_completed_ambiguous": ambiguous,
         "folder_without_notion": absent,
         "completed_without_folder": completed_without,
+        "renames": paired["renames"],
     }
 
 
 def _completed_hits(folder: dict, completed_pages: list[CompletedCase]) -> list[CompletedCase]:
     key = case_match_key(folder["case_name"])
+    admin = admin_sync_key(folder["case_name"])
     land = land_identity(folder["case_name"], folder.get("city") or "")
     return [
         page
         for page in completed_pages
         if case_match_key(page.case_name) == key
+        or (admin and admin_sync_key(page.case_name) == admin)
         or _same_land(land, land_identity(page.case_name, page.city))
     ]
 

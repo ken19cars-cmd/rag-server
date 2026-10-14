@@ -11,6 +11,7 @@ from rag_server.completed import (
     COMPLETED_STATUS_FILTER,
     OPEN_STATUS_FILTER,
     CompletedCase,
+    admin_sync_key,
     case_match_key,
     cases_from_notion_query,
     fetch_notion_database,
@@ -248,6 +249,40 @@ def test_open_notion_query_skips_completed_pages():
     cases = cases_from_notion_query(payload, completed_only=False)
     assert [case.case_name for case in cases] == ["示範公告案", "未填情形"]
     assert cases[1].status == ""
+
+
+PINGTUNG_FOLDER = "屏東高鐵屏東站北側都市更新地區(單元一)公辦都更案"
+PINGTUNG_NOTION = "屏東縣高鐵屏東站北側都市更新地區（單元一）公辦都更案"
+
+
+def test_admin_sync_key_fills_a_unique_county_suffix():
+    assert case_match_key(PINGTUNG_FOLDER) != case_match_key(PINGTUNG_NOTION)
+    assert admin_sync_key(PINGTUNG_FOLDER) == admin_sync_key(PINGTUNG_NOTION)
+    assert admin_sync_key("高雄岡山區某案") == admin_sync_key("高雄市岡山區某案")
+    assert admin_sync_key("嘉義市某案") != admin_sync_key("嘉義縣某案")
+    assert admin_sync_key("嘉義某案") != admin_sync_key("嘉義縣某案")
+    assert admin_sync_key("新竹某案") != admin_sync_key("新竹市某案")
+
+
+def test_pair_renames_folder_that_omits_the_county_suffix():
+    pages = cases_from_notion_query(
+        {"results": [_notion_page("page-pingtung", PINGTUNG_NOTION, "公告中")]},
+        completed_only=False,
+    )
+    paired = pair_notion_pages_to_folders(pages, [_folder(PINGTUNG_FOLDER, "屏東縣")])
+    assert len(paired["matched"]) == 1
+    assert paired["matched"][0]["matched_by"] == "admin"
+    assert paired["matched"][0]["case_name"] == PINGTUNG_NOTION
+    assert paired["renames"] == [
+        {
+            "from_name": PINGTUNG_FOLDER,
+            "to_name": PINGTUNG_NOTION,
+            "source_path": str(Path(PINGTUNG_FOLDER)),
+            "notion_page_id": "page-pingtung",
+            "matched_by": "admin",
+        }
+    ]
+    assert paired["notion_without_folder"] == []
 
 
 def test_case_match_key_folds_tai_space_and_dashes():
@@ -531,3 +566,45 @@ def test_rename_route_renames_folders_to_notion_titles(tmp_path: Path, monkeypat
         assert store.find_case_by_source_path(moved["source_path"])["name"] == XINYI_NOTION
         document_path = str(Path(moved["source_path"]) / "申請須知.txt")
         assert store.find_document_by_source_path(document_path) is not None
+
+
+def test_rename_route_renames_folder_missing_county_suffix(tmp_path: Path, monkeypatch):
+    root = tmp_path / "cases"
+    folder = root / "1.都市更新" / "00屏東縣" / PINGTUNG_FOLDER
+    folder.mkdir(parents=True)
+    (folder / "申請須知.txt").write_text("屏東", encoding="utf-8")
+
+    def fake_fetch(token, database_id, *, client=None, status_filter=None):
+        return {
+            "results": [_notion_page("page-pingtung", PINGTUNG_NOTION, "公告中")],
+            "has_more": False,
+        }
+
+    monkeypatch.setattr("rag_server.service.fetch_notion_database", fake_fetch)
+    settings = Settings(
+        data_dir=str(tmp_path / "data"),
+        embedding_backend="fake",
+        notion_token="secret",
+        notion_database_id="db123",
+        llm_base_url="",
+        llm_api_key="",
+        llm_model="",
+    )
+    from fastapi.testclient import TestClient
+
+    with TestClient(create_app(settings, embedder=FakeEmbedder())) as client:
+        renamed = client.post("/api/pipeline/local-match/rename", params={"root": str(root)})
+    assert renamed.status_code == 200
+    body = renamed.json()
+    assert body["renamed"] == [
+        {
+            "from_name": PINGTUNG_FOLDER,
+            "to_name": PINGTUNG_NOTION,
+            "source_path": str((root / "1.都市更新" / "00屏東縣" / PINGTUNG_NOTION).resolve()),
+            "notion_page_id": "page-pingtung",
+        }
+    ]
+    assert (root / "1.都市更新" / "00屏東縣" / PINGTUNG_NOTION / "申請須知.txt").read_text(encoding="utf-8") == "屏東"
+    assert not folder.exists()
+    assert body["notion_without_folder"] == []
+    assert body["renames"] == []
