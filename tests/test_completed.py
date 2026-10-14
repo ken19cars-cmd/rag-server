@@ -496,22 +496,17 @@ def test_pair_does_not_rename_when_two_folders_share_a_parcel():
     assert len(paired["folder_without_notion"]) == 2
 
 
-def test_rename_route_renames_folders_to_notion_titles(tmp_path: Path, monkeypatch):
+def test_local_match_pairs_without_renaming_the_folder(tmp_path: Path, monkeypatch):
     root = tmp_path / "cases"
-    city = root / "1.都市更新" / "00臺北市"
-    xinyi = city / XINYI
-    yucheng = city / YUCHENG
-    blocked = city / "臺北市大安區幸安段四小段61地號等1筆土地公辦都更案"
-    for folder in (xinyi, yucheng, blocked):
-        folder.mkdir(parents=True)
-        (folder / "申請須知.txt").write_text("保留", encoding="utf-8")
+    folder = root / "1.都市更新" / "00屏東縣" / PINGTUNG_FOLDER
+    folder.mkdir(parents=True)
+    (folder / "申請須知.txt").write_text("屏東", encoding="utf-8")
 
     def fake_fetch(token, database_id, *, client=None, status_filter=None):
         return {
             "results": [
-                _notion_page("page-xinyi", XINYI_NOTION),
-                _notion_page("page-yucheng", YUCHENG_NOTION, "進行中"),
-                _notion_page("page-blocked", "臺北市大安區幸安段四小段61地號等1筆土地:公辦都更案"),
+                _notion_page("page-pingtung", PINGTUNG_NOTION, "公告中"),
+                _notion_page("page-done-only", "招標完成但沒有資料夾", "招標完成"),
             ],
             "has_more": False,
         }
@@ -529,86 +524,17 @@ def test_rename_route_renames_folders_to_notion_titles(tmp_path: Path, monkeypat
     from fastapi.testclient import TestClient
 
     with TestClient(create_app(settings, embedder=FakeEmbedder())) as client:
-        preview = client.get("/api/pipeline/local-match", params={"root": str(root)})
-        assert preview.status_code == 200
-        planned = {item["from_name"]: item["source_path"] for item in preview.json()["renames"]}
-        assert set(planned) == {XINYI, YUCHENG, blocked.name}
-        store = client.app.state.service.store
-        case_id = store.create_case(XINYI, source_path=planned[XINYI])
-        store.add_document(
-            case_id=case_id,
-            source_type="text",
-            title="申請須知.txt",
-            filename="申請須知.txt",
-            source_url=None,
-            page_count=1,
-            ocr_page_count=0,
-            warnings=[],
-            chunks=[],
-            doc_kind="application_notice",
-            source_path=str(Path(planned[XINYI]) / "申請須知.txt"),
-        )
-        renamed = client.post("/api/pipeline/local-match/rename", params={"root": str(root)})
-        assert renamed.status_code == 200
-        body = renamed.json()
-        assert {item["to_name"] for item in body["renamed"]} == {XINYI_NOTION, YUCHENG_NOTION}
-        assert body["skipped"][0]["from_name"] == blocked.name
-        assert "Windows" in body["skipped"][0]["reason"]
-        new_xinyi = city / XINYI_NOTION
-        new_yucheng = city / YUCHENG_NOTION
-        assert new_xinyi.is_dir()
-        assert (new_xinyi / "申請須知.txt").read_text(encoding="utf-8") == "保留"
-        assert new_yucheng.is_dir()
-        assert not xinyi.exists()
-        assert not yucheng.exists()
-        assert blocked.is_dir()
-        assert [item["from_name"] for item in body["renames"]] == [blocked.name]
-        moved = next(item for item in body["renamed"] if item["to_name"] == XINYI_NOTION)
-        assert store.find_case_by_source_path(moved["source_path"])["name"] == XINYI_NOTION
-        document_path = str(Path(moved["source_path"]) / "申請須知.txt")
-        assert store.find_document_by_source_path(document_path) is not None
-
-
-def test_rename_route_renames_folder_missing_county_suffix(tmp_path: Path, monkeypatch):
-    root = tmp_path / "cases"
-    folder = root / "1.都市更新" / "00屏東縣" / PINGTUNG_FOLDER
-    folder.mkdir(parents=True)
-    (folder / "申請須知.txt").write_text("屏東", encoding="utf-8")
-
-    def fake_fetch(token, database_id, *, client=None, status_filter=None):
-        return {
-            "results": [_notion_page("page-pingtung", PINGTUNG_NOTION, "公告中")],
-            "has_more": False,
-        }
-
-    monkeypatch.setattr("rag_server.service.fetch_notion_database", fake_fetch)
-    settings = Settings(
-        data_dir=str(tmp_path / "data"),
-        embedding_backend="fake",
-        notion_token="secret",
-        notion_database_id="db123",
-        llm_base_url="",
-        llm_api_key="",
-        llm_model="",
-    )
-    from fastapi.testclient import TestClient
-
-    with TestClient(create_app(settings, embedder=FakeEmbedder())) as client:
-        renamed = client.post("/api/pipeline/local-match/rename", params={"root": str(root)})
-    assert renamed.status_code == 200
-    body = renamed.json()
-    assert body["renamed"] == [
-        {
-            "from_name": PINGTUNG_FOLDER,
-            "to_name": PINGTUNG_NOTION,
-            "source_path": str((root / "1.都市更新" / "00屏東縣" / PINGTUNG_NOTION).resolve()),
-            "notion_page_id": "page-pingtung",
-        }
-    ]
-    assert (root / "1.都市更新" / "00屏東縣" / PINGTUNG_NOTION / "申請須知.txt").read_text(encoding="utf-8") == "屏東"
-    assert not folder.exists()
-    assert body["notion_without_folder"] == []
-    assert body["renames"] == []
+        listed = client.get("/api/pipeline/local-match", params={"root": str(root)})
+        missing = client.post("/api/pipeline/local-match/rename", params={"root": str(root)})
+    assert listed.status_code == 200
+    body = listed.json()
+    assert body["matched"][0]["folder_name"] == PINGTUNG_FOLDER
+    assert body["matched"][0]["case_name"] == PINGTUNG_NOTION
+    assert [item["case_name"] for item in body["completed_without_folder"]] == ["招標完成但沒有資料夾"]
+    assert folder.is_dir()
+    assert (folder / "申請須知.txt").read_text(encoding="utf-8") == "屏東"
+    assert not (root / "1.都市更新" / "00屏東縣" / PINGTUNG_NOTION).exists()
+    assert missing.status_code == 404
 
 
 YUNLIN = "高速鐵路雲林車站特定區車站專用區(三)開發經營案"
@@ -729,38 +655,3 @@ def test_local_match_pairs_a_renamed_folder_above_the_city_level(tmp_path: Path,
     assert missing[0]["near_folders"] == []
 
 
-def test_rename_route_renames_a_case_folder_directly_under_the_type(tmp_path: Path, monkeypatch):
-    root = tmp_path / "cases"
-    folder = root / "公告中" / PINGTUNG_FOLDER / "1150921公開閱覽"
-    folder.mkdir(parents=True)
-    (folder / "申請須知.txt").write_text("屏東", encoding="utf-8")
-
-    def fake_fetch(token, database_id, *, client=None, status_filter=None):
-        return {
-            "results": [_notion_page("page-pingtung", PINGTUNG_NOTION, "公告中")],
-            "has_more": False,
-        }
-
-    monkeypatch.setattr("rag_server.service.fetch_notion_database", fake_fetch)
-    settings = Settings(
-        data_dir=str(tmp_path / "data"),
-        embedding_backend="fake",
-        notion_token="secret",
-        notion_database_id="db123",
-        llm_base_url="",
-        llm_api_key="",
-        llm_model="",
-    )
-    from fastapi.testclient import TestClient
-
-    with TestClient(create_app(settings, embedder=FakeEmbedder())) as client:
-        renamed = client.post("/api/pipeline/local-match/rename", params={"root": str(root)})
-    assert renamed.status_code == 200
-    body = renamed.json()
-    target = root / "公告中" / PINGTUNG_NOTION
-    assert target.is_dir()
-    assert (target / "1150921公開閱覽" / "申請須知.txt").read_text(encoding="utf-8") == "屏東"
-    assert not (root / "公告中" / PINGTUNG_FOLDER).exists()
-    assert [item["to_name"] for item in body["renamed"]] == [PINGTUNG_NOTION]
-    assert body["notion_without_folder"] == []
-    assert body["skipped"] == []

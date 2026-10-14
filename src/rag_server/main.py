@@ -220,10 +220,6 @@ def create_app(
     def local_match(root: str = "") -> dict:
         return app.state.service.match_open_notion_cases(root)
 
-    @app.post("/api/pipeline/local-match/rename")
-    def rename_local_match(root: str = "") -> dict:
-        return app.state.service.rename_open_case_folders(root)
-
     @app.post(
         "/api/notion/analyze",
         response_model=NotionAnalysisResult,

@@ -24,7 +24,9 @@ def test_status_page_lists_ready_and_phase2(client):
         assert "Tailscale" in page
         assert "CASES_ROOT" in page
     assert "對上本地案件" in page
-    assert "改成 Notion 案名" in page
+    assert "改成 Notion 案名" not in page
+    assert "local-match/rename" not in page
+    assert "這一份可以略過" in page
     assert "招標完成，資料夾也有" in page
     assert "資料夾有、Notion 完全沒有" in page
     assert "進行中，已對上" in page
