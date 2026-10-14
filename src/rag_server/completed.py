@@ -417,6 +417,61 @@ def pair_notion_pages_to_folders(pages: list[CompletedCase], folders: list) -> d
     }
 
 
+def describe_completed_folders(remaining_folders: list, completed_pages: list[CompletedCase]) -> dict:
+    """Say which leftover folders already exist as 招標完成 pages.
+
+    Unique name or land pairs become ``folder_completed``. A folder that hits
+    more than one completed page stays out of the automatic pair and is listed
+    under ``folder_completed_ambiguous``. Folders with no completed page stay
+    in ``folder_without_notion``.
+    """
+    paired = pair_notion_pages_to_folders(completed_pages, remaining_folders)
+    ambiguous: list[dict] = []
+    absent: list[dict] = []
+    claimed_ids: set[str] = set()
+    for folder in paired["folder_without_notion"]:
+        hits = _completed_hits(folder, completed_pages)
+        if not hits:
+            absent.append(folder)
+            continue
+        claimed_ids.update(hit.notion_page_id for hit in hits)
+        ambiguous.append(
+            {
+                **folder,
+                "notion_pages": [
+                    {
+                        "case_name": hit.case_name,
+                        "notion_page_id": hit.notion_page_id,
+                        "status": hit.status,
+                    }
+                    for hit in hits
+                ],
+            }
+        )
+    completed_without = [
+        page
+        for page in paired["notion_without_folder"]
+        if page["notion_page_id"] not in claimed_ids
+    ]
+    return {
+        "folder_completed": paired["matched"],
+        "folder_completed_ambiguous": ambiguous,
+        "folder_without_notion": absent,
+        "completed_without_folder": completed_without,
+    }
+
+
+def _completed_hits(folder: dict, completed_pages: list[CompletedCase]) -> list[CompletedCase]:
+    key = case_match_key(folder["case_name"])
+    land = land_identity(folder["case_name"], folder.get("city") or "")
+    return [
+        page
+        for page in completed_pages
+        if case_match_key(page.case_name) == key
+        or _same_land(land, land_identity(page.case_name, page.city))
+    ]
+
+
 def _document_rows(documents: list) -> list[dict]:
     return [
         {

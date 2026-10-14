@@ -9,10 +9,12 @@ from pypdf.errors import PdfReadError
 from rag_server.analysis import analyze_case, answer_question
 from rag_server.chunking import chunk_pages
 from rag_server.completed import (
+    COMPLETED_STATUS_FILTER,
     OPEN_STATUS_FILTER,
     CompletedCase,
     SearchBackend,
     cases_from_notion_query,
+    describe_completed_folders,
     fetch_notion_database,
     load_case_file,
     pair_notion_pages_to_folders,
@@ -45,6 +47,18 @@ class CaseNotFound(Exception):
 
 class IngestError(Exception):
     pass
+
+
+def _classify_folders(open_pages: list[CompletedCase], completed_pages: list[CompletedCase], folders: list) -> dict:
+    paired = pair_notion_pages_to_folders(open_pages, folders)
+    used = {item["source_path"] for item in paired["matched"]}
+    remaining = [folder for folder in folders if str(folder.folder) not in used]
+    completed = describe_completed_folders(remaining, completed_pages)
+    paired["folder_completed"] = completed["folder_completed"]
+    paired["folder_completed_ambiguous"] = completed["folder_completed_ambiguous"]
+    paired["completed_without_folder"] = completed["completed_without_folder"]
+    paired["folder_without_notion"] = completed["folder_without_notion"]
+    return paired
 
 
 def _corpus_case_dict(case: CorpusCase) -> dict:
@@ -441,41 +455,47 @@ class CaseService:
         )
 
     def match_open_notion_cases(self, root: str = "") -> dict:
-        """Pair Notion pages that are not 招標完成 with local case folders."""
-        pages, folders, _root = self._open_pages_and_folders(root)
-        return pair_notion_pages_to_folders(pages, folders)
+        """Pair Notion pages with local case folders, and label 招標完成 separately."""
+        open_pages, completed_pages, folders, _root = self._pages_and_folders(root)
+        return _classify_folders(open_pages, completed_pages, folders)
 
     def rename_open_case_folders(self, root: str = "") -> dict:
-        """Rename uniquely matched case folders to the Notion page title.
+        """Rename uniquely matched open-case folders to the Notion page title.
 
-        招標完成 pages are not in this set. A folder is renamed only when the
-        pairing is one page to one folder, and the new name stays inside
-        CASES_ROOT. This does not write Notion.
+        招標完成 pages stay in their own list and are not renamed here. A folder
+        is renamed only when the pairing is one open page to one folder, and
+        the new name stays inside CASES_ROOT. This does not write Notion.
         """
-        pages, folders, root_path = self._open_pages_and_folders(root)
-        paired = pair_notion_pages_to_folders(pages, folders)
+        open_pages, completed_pages, folders, root_path = self._pages_and_folders(root)
+        paired = pair_notion_pages_to_folders(open_pages, folders)
         renamed, skipped = self._rename_paired_folders(paired["renames"], root_path)
-        result = pair_notion_pages_to_folders(pages, scan_cases_root(root_path))
+        result = _classify_folders(open_pages, completed_pages, scan_cases_root(root_path))
         result["renamed"] = renamed
         result["skipped"] = skipped
         return result
 
-    def _open_pages_and_folders(self, root: str):
+    def _pages_and_folders(self, root: str):
         token = self.settings.notion_token.strip()
         database_id = self.settings.notion_database_id.strip()
         if not token or not database_id:
             raise IngestError("set RAG_NOTION_TOKEN and RAG_NOTION_DATABASE_ID")
         try:
-            payload = fetch_notion_database(
+            open_payload = fetch_notion_database(
                 token,
                 database_id,
                 status_filter=OPEN_STATUS_FILTER,
             )
+            completed_payload = fetch_notion_database(
+                token,
+                database_id,
+                status_filter=COMPLETED_STATUS_FILTER,
+            )
         except RuntimeError as exc:
             raise IngestError(str(exc)) from exc
-        pages = cases_from_notion_query(payload, completed_only=False)
+        open_pages = cases_from_notion_query(open_payload, completed_only=False)
+        completed_pages = cases_from_notion_query(completed_payload, completed_only=True)
         root_path = self._cases_root(root).resolve()
-        return pages, scan_cases_root(root_path), root_path
+        return open_pages, completed_pages, scan_cases_root(root_path), root_path
 
     def _rename_paired_folders(self, renames: list[dict], root_path: Path) -> tuple[list[dict], list[dict]]:
         renamed: list[dict] = []

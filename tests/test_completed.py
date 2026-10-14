@@ -8,6 +8,7 @@ from pathlib import Path
 import httpx
 
 from rag_server.completed import (
+    COMPLETED_STATUS_FILTER,
     OPEN_STATUS_FILTER,
     CompletedCase,
     case_match_key,
@@ -281,13 +282,19 @@ def test_local_match_pairs_open_pages_and_skips_completed(tmp_path: Path, monkey
     orphan = root / "1.都市更新" / "00臺北市" / "只有資料夾"
     orphan.mkdir(parents=True)
     (orphan / "需求說明書.txt").write_text("x", encoding="utf-8")
+    absent = root / "1.都市更新" / "00臺北市" / "基隆市七堵區一德新村公辦都更案"
+    absent.mkdir(parents=True)
+    (absent / "申請須知.txt").write_text("完成案仍在磁碟", encoding="utf-8")
+    nowhere = root / "1.都市更新" / "00臺北市" / "完全沒有頁"
+    nowhere.mkdir(parents=True)
+    (nowhere / "申請須知.txt").write_text("沒有頁", encoding="utf-8")
 
-    seen: dict = {}
+    seen: dict = {"filters": []}
 
     def fake_fetch(token, database_id, *, client=None, status_filter=None):
         seen["token"] = token
         seen["database_id"] = database_id
-        seen["filter"] = status_filter
+        seen["filters"].append(status_filter)
         return {
             "results": [
                 {
@@ -301,6 +308,21 @@ def test_local_match_pairs_open_pages_and_skips_completed(tmp_path: Path, monkey
                     "id": "page-done",
                     "properties": {
                         "案件名稱": {"type": "title", "title": [{"plain_text": "只有資料夾"}]},
+                        "招商情形": {"type": "status", "status": {"name": "招標完成"}},
+                    },
+                },
+                {
+                    "id": "page-keelung",
+                    "properties": {
+                        "案件名稱": {"type": "title", "title": [{"plain_text": "基隆市七堵區一德新村公辦都更案"}]},
+                        "招商情形": {"type": "status", "status": {"name": "招標完成"}},
+                        "縣市別": {"type": "select", "select": {"name": "基隆市"}},
+                    },
+                },
+                {
+                    "id": "page-done-only",
+                    "properties": {
+                        "案件名稱": {"type": "title", "title": [{"plain_text": "招標完成但沒有資料夾"}]},
                         "招商情形": {"type": "status", "status": {"name": "招標完成"}},
                     },
                 },
@@ -331,7 +353,7 @@ def test_local_match_pairs_open_pages_and_skips_completed(tmp_path: Path, monkey
         listed = client.get("/api/pipeline/local-match", params={"root": str(root)})
     assert seen["token"] == "secret"
     assert seen["database_id"] == "db123"
-    assert seen["filter"] == OPEN_STATUS_FILTER
+    assert seen["filters"] == [OPEN_STATUS_FILTER, COMPLETED_STATUS_FILTER]
     assert listed.status_code == 200
     body = listed.json()
     assert len(body["matched"]) == 1
@@ -345,7 +367,12 @@ def test_local_match_pairs_open_pages_and_skips_completed(tmp_path: Path, monkey
     assert [doc["filename"] for doc in hit["documents"]] == ["申請須知.txt"]
     assert "1150921" in hit["documents"][0]["source_path"]
     assert [item["case_name"] for item in body["notion_without_folder"]] == ["沒有資料夾"]
-    assert [item["case_name"] for item in body["folder_without_notion"]] == ["只有資料夾"]
+    completed_names = [item["folder_name"] for item in body["folder_completed"]]
+    assert completed_names == ["只有資料夾", "基隆市七堵區一德新村公辦都更案"]
+    assert body["folder_completed"][1]["status"] == "招標完成"
+    assert body["folder_completed"][1]["matched_by"] == "name"
+    assert [item["case_name"] for item in body["completed_without_folder"]] == ["招標完成但沒有資料夾"]
+    assert [item["case_name"] for item in body["folder_without_notion"]] == ["完全沒有頁"]
 
     bare = Settings(
         data_dir=str(tmp_path / "empty"),
