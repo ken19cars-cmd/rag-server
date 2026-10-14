@@ -80,8 +80,8 @@ def _unfilled_page_row(page: CompletedCase) -> dict:
     }
 
 
-def _with_overview(item: dict, missing_paragraph_ids: set[str]) -> dict:
-    overview = "missing_paragraph" if item.get("notion_page_id") in missing_paragraph_ids else "empty"
+def _with_overview(item: dict, overview_by_id: dict[str, str]) -> dict:
+    overview = overview_by_id.get(str(item.get("notion_page_id") or ""), "empty")
     return {**item, "overview": overview}
 
 
@@ -492,10 +492,11 @@ class CaseService:
         )
 
     def list_unfilled_notion_cases(self, root: str = "") -> dict:
-        """List in-progress pages whose ❯計畫概述 paragraph is still empty.
+        """List in-progress pages whose ❯計畫概述 does not yet describe the case.
 
-        A page that already has text there is left out of the write list.
-        招標完成 pages are not read. This does not update Notion.
+        Applying the template does not count as content. A page is left out of
+        the write list only when that section has case prose. 招標完成 pages
+        are not read. This does not update Notion.
         """
         open_pages, _completed, folders, _root = self._pages_and_folders(root)
         token = self.settings.notion_token.strip()
@@ -503,7 +504,7 @@ class CaseService:
         missing_heading: list[dict] = []
         errors: list[dict] = []
         unfilled_pages: list[CompletedCase] = []
-        missing_paragraph_ids: set[str] = set()
+        overview_by_id: dict[str, str] = {}
         with httpx.Client(timeout=30.0) as http:
             for page in open_pages:
                 if not page.notion_page_id:
@@ -520,17 +521,15 @@ class CaseService:
                 elif state == "missing_heading":
                     missing_heading.append(_unfilled_page_row(page))
                 else:
-                    if state == "missing_paragraph":
-                        missing_paragraph_ids.add(page.notion_page_id)
+                    overview_by_id[page.notion_page_id] = state
                     unfilled_pages.append(page)
         paired = pair_notion_pages_to_folders(unfilled_pages, folders)
         return {
             "unfilled_matched": [
-                _with_overview(item, missing_paragraph_ids) for item in paired["matched"]
+                _with_overview(item, overview_by_id) for item in paired["matched"]
             ],
             "unfilled_without_folder": [
-                _with_overview(item, missing_paragraph_ids)
-                for item in paired["notion_without_folder"]
+                _with_overview(item, overview_by_id) for item in paired["notion_without_folder"]
             ],
             "filled": filled,
             "missing_heading": missing_heading,

@@ -24,12 +24,64 @@ def _paragraph(text: str, block_id: str = "p-overview") -> dict:
     return {"id": block_id, "type": "paragraph", "paragraph": _rich(text)}
 
 
+def _bullet(text: str, block_id: str) -> dict:
+    return {"id": block_id, "type": "bulleted_list_item", "bulleted_list_item": _rich(text)}
+
+
+def _gray(text: str, block_id: str = "p-gray") -> dict:
+    return {
+        "id": block_id,
+        "type": "paragraph",
+        "paragraph": {"rich_text": [{"plain_text": text, "annotations": {"color": "gray"}}]},
+    }
+
+
 def test_overview_state_reads_the_paragraph_under_the_heading():
     assert overview_state([_heading("❯計畫概述"), _paragraph("")]) == "empty"
     assert overview_state([_heading("❯計畫概述"), _paragraph("\u200b")]) == "empty"
     assert overview_state([_heading("❯計畫概述"), _paragraph("本案位於示範區。")]) == "filled"
     assert overview_state([_heading("❯計畫概述"), _heading("❯基地基本資料", "h-base")]) == "missing_paragraph"
     assert overview_state([_heading("❯基地基本資料", "h-base"), _paragraph("只有基地")]) == "missing_heading"
+
+
+def test_applied_template_is_not_case_content():
+    hints = [
+        _heading("❯計畫概述"),
+        _paragraph(""),
+        _bullet("本案是什麼案件", "b1"),
+        _bullet("為什麼辦理", "b2"),
+        _bullet("主要開發目的", "b3"),
+        _bullet("主要開發方向", "b4"),
+        _bullet("重要背景", "b5"),
+    ]
+    assert overview_state(hints) == "template"
+    assert overview_state([_heading("❯計畫概述"), _paragraph("本案是什麼案件")]) == "template"
+    assert overview_state([_heading("❯計畫概述"), _paragraph("一般資格")]) == "template"
+    assert overview_state([_heading("❯計畫概述"), _paragraph("合作聯盟（3家以內）")]) == "template"
+    assert overview_state([_heading("❯計畫概述"), _gray("請在此寫計畫概述")]) == "template"
+    assert overview_state([_heading("❯計畫概述"), _paragraph("1.項目")]) == "template"
+    assert overview_state(
+        [
+            _heading("❯計畫概述"),
+            {
+                "id": "row",
+                "type": "table_row",
+                "cells": ["一般資格", "單一申請人", "合作聯盟(3家以內)"],
+            },
+        ]
+    ) == "template"
+    mixed = [
+        _heading("❯計畫概述"),
+        _gray("請在此寫計畫概述"),
+        _paragraph("本案位於示範區。", "p-real"),
+    ]
+    assert overview_state(mixed) == "filled"
+    written_as_bullets = [
+        _heading("❯計畫概述"),
+        _paragraph(""),
+        _bullet("本案位於示範區。", "b-real"),
+    ]
+    assert overview_state(written_as_bullets) == "filled"
 
 
 def test_fetch_block_children_follows_the_cursor():
@@ -67,6 +119,12 @@ def test_unfilled_route_lists_blank_pages_and_skips_filled_ones(tmp_path: Path, 
     blocks = {
         "page-blank": [_heading("❯計畫概述"), _paragraph("")],
         "page-filled": [_heading("❯計畫概述"), _paragraph("已經寫過。")],
+        "page-template": [
+            _heading("❯計畫概述"),
+            _paragraph(""),
+            _bullet("本案是什麼案件", "b1"),
+            _bullet("為什麼辦理", "b2"),
+        ],
         "page-orphan": [_heading("❯計畫概述"), _paragraph("")],
         "page-no-heading": [_heading("❯其他", "h-other"), _paragraph("不是概述")],
         "page-broken": [_heading("❯計畫概述")],
@@ -78,6 +136,7 @@ def test_unfilled_route_lists_blank_pages_and_skips_filled_ones(tmp_path: Path, 
             "results": [
                 _page("page-blank", "示範空白案", "前置作業"),
                 _page("page-filled", "已經填過的案", "公告中"),
+                _page("page-template", "只有範本提示的案", "前置作業"),
                 _page("page-orphan", "沒有資料夾的空白案", "進行中"),
                 _page("page-no-heading", "沒有概述標題", "前置作業"),
                 _page("page-broken", "標題下沒有段落", "前置作業"),
@@ -113,10 +172,12 @@ def test_unfilled_route_lists_blank_pages_and_skips_filled_ones(tmp_path: Path, 
     assert body["unfilled_matched"][0]["overview"] == "empty"
     assert body["unfilled_matched"][0]["folder_name"] == "示範空白案"
     assert [item["case_name"] for item in body["unfilled_without_folder"]] == [
+        "只有範本提示的案",
         "沒有資料夾的空白案",
         "標題下沒有段落",
     ]
-    assert body["unfilled_without_folder"][1]["overview"] == "missing_paragraph"
+    assert body["unfilled_without_folder"][0]["overview"] == "template"
+    assert body["unfilled_without_folder"][2]["overview"] == "missing_paragraph"
     assert [item["case_name"] for item in body["filled"]] == ["已經填過的案"]
     assert [item["case_name"] for item in body["missing_heading"]] == ["沒有概述標題"]
     assert body["errors"] == []

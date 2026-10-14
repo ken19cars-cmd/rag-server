@@ -157,7 +157,7 @@
         <article>
           <h3>未完成頁對上資料夾</h3>
           <p><code>GET /api/pipeline/local-match</code>。進行中的頁先對頁名，再對地號，再把少寫的縣、市補上。招標完成的頁另外列出。這個對照不改資料夾名稱，也不把分析內容寫進頁面。</p>
-          <p><code>GET /api/pipeline/unfilled</code>。進行中的頁再讀 blocks。❯計畫概述底下的段落是空的，才算還沒填，並對上案件夾。已經有文字的頁列出來，這次不寫。不更新 Notion。</p>
+          <p><code>GET /api/pipeline/unfilled</code>。進行中的頁再讀 blocks。❯計畫概述底下要有這個案子自己的文字，才算已填。套用範本不算有內容，這種頁一樣列在還沒填，並對上案件夾。已經寫了本案內容的頁列出來，這次不寫。不更新 Notion。</p>
         </article>
         <article>
           <h3>PDF 寫入與合併</h3>
@@ -395,15 +395,20 @@
       return lines.join("\n");
     }
 
+    function overviewNote(item) {
+      if (item.overview === "missing_paragraph") return "（標題下沒有段落）";
+      if (item.overview === "template") return "（只有範本）";
+      return "";
+    }
+
     function formatUnfilled(payload) {
       const lines = [];
-      lines.push("這個按鈕只列出空白頁，不寫入 Notion。已經有 ❯計畫概述 的頁略過。");
+      lines.push("這個按鈕只列出還沒寫本案內容的頁，不寫入 Notion。套用範本不算有內容。");
       lines.push("");
       const matched = payload.unfilled_matched || [];
       lines.push("還沒填，已對上資料夾 " + matched.length + " 件");
       matched.forEach((item) => {
-        const note = item.overview === "missing_paragraph" ? "（標題下沒有段落）" : "";
-        lines.push((item.status || "未填招商情形") + " / " + item.case_name + note);
+        lines.push((item.status || "未填招商情形") + " / " + item.case_name + overviewNote(item));
         lines.push("  資料夾：" + item.folder_name);
         lines.push("  " + item.case_type + " / " + (item.city || "沒有縣市層"));
       });
@@ -411,7 +416,7 @@
       lines.push("");
       lines.push("還沒填，沒有資料夾 " + missingFolder.length + " 件");
       missingFolder.forEach((item) => {
-        lines.push((item.status || "未填招商情形") + " / " + item.case_name);
+        lines.push((item.status || "未填招商情形") + " / " + item.case_name + overviewNote(item));
         const near = item.near_folders || [];
         if (!near.length) {
           lines.push("  掃描沒有看到相近的資料夾。");
@@ -423,7 +428,7 @@
       });
       const filled = payload.filled || [];
       lines.push("");
-      lines.push("已經有計畫概述 " + filled.length + " 件，這次不寫。");
+      lines.push("計畫概述已寫了本案內容 " + filled.length + " 件，這次不寫。");
       filled.forEach((item) => {
         lines.push((item.status || "未填招商情形") + " / " + item.case_name);
       });
