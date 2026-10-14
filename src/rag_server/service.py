@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import httpx
 from pypdf.errors import PdfReadError
 
 from rag_server.analysis import analyze_case, answer_question
@@ -34,6 +35,7 @@ from rag_server.crawler import CrawledDocument, Crawler, Fetcher, HttpFetcher
 from rag_server.embeddings import Embedder
 from rag_server.llm import LlmClient
 from rag_server.notion_analysis import analyze_to_notion
+from rag_server.notion_blocks import fetch_block_children, overview_state
 from rag_server.pdf_extract import ExtractedPage, OcrEngine, TesseractOcrEngine, extract_pdf_bytes
 from rag_server.schemas import (
     AnalysisResponse,
@@ -67,6 +69,20 @@ def _folders_for_pages(root_path: Path, pages: list[CompletedCase]) -> list:
         return case_match_key(name) in keys or loose_match_key(name) in loose_keys
 
     return retarget_folders_named_like(root_path, folders_for_local_match(root_path), hits)
+
+
+def _unfilled_page_row(page: CompletedCase) -> dict:
+    return {
+        "case_name": page.case_name,
+        "notion_page_id": page.notion_page_id,
+        "status": page.status,
+        "city": page.city,
+    }
+
+
+def _with_overview(item: dict, missing_paragraph_ids: set[str]) -> dict:
+    overview = "missing_paragraph" if item.get("notion_page_id") in missing_paragraph_ids else "empty"
+    return {**item, "overview": overview}
 
 
 def _classify_folders(open_pages: list[CompletedCase], completed_pages: list[CompletedCase], folders: list) -> dict:
@@ -474,6 +490,52 @@ class CaseService:
             template_blocks=template_blocks or [],
             llm=self.llm,
         )
+
+    def list_unfilled_notion_cases(self, root: str = "") -> dict:
+        """List in-progress pages whose ❯計畫概述 paragraph is still empty.
+
+        A page that already has text there is left out of the write list.
+        招標完成 pages are not read. This does not update Notion.
+        """
+        open_pages, _completed, folders, _root = self._pages_and_folders(root)
+        token = self.settings.notion_token.strip()
+        filled: list[dict] = []
+        missing_heading: list[dict] = []
+        errors: list[dict] = []
+        unfilled_pages: list[CompletedCase] = []
+        missing_paragraph_ids: set[str] = set()
+        with httpx.Client(timeout=30.0) as http:
+            for page in open_pages:
+                if not page.notion_page_id:
+                    errors.append(_unfilled_page_row(page) | {"error": "頁面沒有 id"})
+                    continue
+                try:
+                    raw_blocks = fetch_block_children(token, page.notion_page_id, client=http)
+                except RuntimeError as exc:
+                    errors.append(_unfilled_page_row(page) | {"error": str(exc)})
+                    continue
+                state = overview_state(raw_blocks)
+                if state == "filled":
+                    filled.append(_unfilled_page_row(page))
+                elif state == "missing_heading":
+                    missing_heading.append(_unfilled_page_row(page))
+                else:
+                    if state == "missing_paragraph":
+                        missing_paragraph_ids.add(page.notion_page_id)
+                    unfilled_pages.append(page)
+        paired = pair_notion_pages_to_folders(unfilled_pages, folders)
+        return {
+            "unfilled_matched": [
+                _with_overview(item, missing_paragraph_ids) for item in paired["matched"]
+            ],
+            "unfilled_without_folder": [
+                _with_overview(item, missing_paragraph_ids)
+                for item in paired["notion_without_folder"]
+            ],
+            "filled": filled,
+            "missing_heading": missing_heading,
+            "errors": errors,
+        }
 
     def match_open_notion_cases(self, root: str = "") -> dict:
         """Pair Notion pages with local case folders, and label 招標完成 separately.

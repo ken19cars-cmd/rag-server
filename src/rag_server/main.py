@@ -220,6 +220,10 @@ def create_app(
     def local_match(root: str = "") -> dict:
         return app.state.service.match_open_notion_cases(root)
 
+    @app.get("/api/pipeline/unfilled")
+    def unfilled_pages(root: str = "") -> dict:
+        return app.state.service.list_unfilled_notion_cases(root)
+
     @app.post(
         "/api/notion/analyze",
         response_model=NotionAnalysisResult,
