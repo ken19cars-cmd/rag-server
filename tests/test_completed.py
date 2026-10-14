@@ -17,6 +17,7 @@ from rag_server.completed import (
     fetch_notion_database,
     land_identity,
     load_case_file,
+    loose_match_key,
     pair_notion_pages_to_folders,
     research_case,
 )
@@ -608,3 +609,158 @@ def test_rename_route_renames_folder_missing_county_suffix(tmp_path: Path, monke
     assert not folder.exists()
     assert body["notion_without_folder"] == []
     assert body["renames"] == []
+
+
+YUNLIN = "高速鐵路雲林車站特定區車站專用區(三)開發經營案"
+TAINAN_STATION = "高速鐵路臺南車站特定區產業專用區(武東段279、286地號)開發經營案"
+TAINAN_STATION_LOOSE = "高速鐵路臺南車站特定區產業專用區武東段279,286地號開發經營案"
+TRADE_PARCELS = "臺中市西屯區經貿段6、8地號等兩筆土地設定地上權案"
+TRADE_PARCELS_ASCII = "臺中市西屯區經貿段6,8地號等2筆土地設定地上權案"
+
+
+def test_case_match_key_drops_zero_width_characters():
+    assert case_match_key("案\u200b名") == case_match_key("案名")
+
+
+def test_admin_sync_key_leaves_pingtung_city_alone():
+    title = "屏東市舊酒廠段3、5地號國有非公用土地開發案"
+    assert admin_sync_key(title) == case_match_key(title)
+    assert "屏東縣市" not in admin_sync_key(title)
+
+
+def test_land_identity_treats_list_punctuation_and_liang_as_the_same_parcels():
+    listed = land_identity(TRADE_PARCELS)
+    assert listed == land_identity(TRADE_PARCELS_ASCII)
+    assert listed[3:] == ("6,8", "2")
+    assert land_identity("臺北市中山區長春段一小段712-1地號等4筆土地")[3] == "712-1"
+    shuijiao = "臺南市南區水交社段72、72-1、72-2地號等3筆營改土地合作開發案"
+    assert land_identity(shuijiao)[3] == land_identity(shuijiao.replace("、", ","))[3]
+
+
+def test_loose_match_key_ignores_parentheses_and_list_marks():
+    assert case_match_key(TAINAN_STATION) != case_match_key(TAINAN_STATION_LOOSE)
+    assert loose_match_key(TAINAN_STATION) == loose_match_key(TAINAN_STATION_LOOSE)
+    assert loose_match_key(TRADE_PARCELS) == loose_match_key(TRADE_PARCELS_ASCII)
+
+
+def test_pair_uses_loose_key_when_punctuation_is_the_only_difference():
+    pages = cases_from_notion_query(
+        {"results": [_notion_page("page-station", TAINAN_STATION, "前置作業")]},
+        completed_only=False,
+    )
+    paired = pair_notion_pages_to_folders(pages, [_folder(TAINAN_STATION_LOOSE, "臺南市")])
+    assert len(paired["matched"]) == 1
+    assert paired["matched"][0]["matched_by"] == "loose"
+    assert paired["matched"][0]["case_name"] == TAINAN_STATION
+    assert paired["notion_without_folder"] == []
+
+
+def test_pair_prefers_the_folder_already_named_with_the_notion_title():
+    pages = cases_from_notion_query(
+        {"results": [_notion_page("page-xinyi", "臺北市信義段小案")]},
+        completed_only=False,
+    )
+    paired = pair_notion_pages_to_folders(
+        pages,
+        [_folder("台北市信義段小案"), _folder("臺北市信義段小案")],
+    )
+    assert [item["folder_name"] for item in paired["matched"]] == ["臺北市信義段小案"]
+    assert [item["case_name"] for item in paired["folder_without_notion"]] == ["台北市信義段小案"]
+    assert paired["renames"] == []
+
+
+def test_pair_lists_near_folders_when_two_loose_names_collide():
+    other = TAINAN_STATION_LOOSE.replace(",", "、")
+    pages = cases_from_notion_query(
+        {"results": [_notion_page("page-station", TAINAN_STATION, "前置作業")]},
+        completed_only=False,
+    )
+    paired = pair_notion_pages_to_folders(
+        pages,
+        [_folder(TAINAN_STATION_LOOSE, "臺南市"), _folder(other, "臺南市")],
+    )
+    assert paired["matched"] == []
+    near = paired["notion_without_folder"][0]["near_folders"]
+    assert {item["case_name"] for item in near} == {TAINAN_STATION_LOOSE, other}
+
+
+def test_local_match_pairs_a_renamed_folder_above_the_city_level(tmp_path: Path, monkeypatch):
+    root = tmp_path / "cases"
+    nested = root / "前置作業" / YUNLIN / "附件"
+    nested.mkdir(parents=True)
+    (nested / "申請須知.txt").write_text("雲林", encoding="utf-8")
+    direct = root / "前置作業" / "臺南市新化區虎頭埤湖濱旅館BOT案"
+    direct.mkdir(parents=True)
+    (direct / "需求說明書.txt").write_text("虎", encoding="utf-8")
+
+    def fake_fetch(token, database_id, *, client=None, status_filter=None):
+        return {
+            "results": [
+                _notion_page("page-yunlin", YUNLIN, "前置作業"),
+                _notion_page("page-bot", direct.name, "前置作業"),
+                _notion_page("page-intro", "案件介紹", "公告中"),
+            ],
+            "has_more": False,
+        }
+
+    monkeypatch.setattr("rag_server.service.fetch_notion_database", fake_fetch)
+    settings = Settings(
+        data_dir=str(tmp_path / "data"),
+        embedding_backend="fake",
+        notion_token="secret",
+        notion_database_id="db123",
+        llm_base_url="",
+        llm_api_key="",
+        llm_model="",
+    )
+    from fastapi.testclient import TestClient
+
+    with TestClient(create_app(settings, embedder=FakeEmbedder())) as client:
+        listed = client.get("/api/pipeline/local-match", params={"root": str(root)})
+    assert listed.status_code == 200
+    body = listed.json()
+    by_page = {item["notion_page_id"]: item for item in body["matched"]}
+    assert set(by_page) == {"page-yunlin", "page-bot"}
+    assert by_page["page-yunlin"]["folder_name"] == YUNLIN
+    assert [doc["filename"] for doc in by_page["page-yunlin"]["documents"]] == ["申請須知.txt"]
+    assert by_page["page-bot"]["folder_name"] == direct.name
+    missing = body["notion_without_folder"]
+    assert [item["case_name"] for item in missing] == ["案件介紹"]
+    assert missing[0]["near_folders"] == []
+
+
+def test_rename_route_renames_a_case_folder_directly_under_the_type(tmp_path: Path, monkeypatch):
+    root = tmp_path / "cases"
+    folder = root / "公告中" / PINGTUNG_FOLDER / "1150921公開閱覽"
+    folder.mkdir(parents=True)
+    (folder / "申請須知.txt").write_text("屏東", encoding="utf-8")
+
+    def fake_fetch(token, database_id, *, client=None, status_filter=None):
+        return {
+            "results": [_notion_page("page-pingtung", PINGTUNG_NOTION, "公告中")],
+            "has_more": False,
+        }
+
+    monkeypatch.setattr("rag_server.service.fetch_notion_database", fake_fetch)
+    settings = Settings(
+        data_dir=str(tmp_path / "data"),
+        embedding_backend="fake",
+        notion_token="secret",
+        notion_database_id="db123",
+        llm_base_url="",
+        llm_api_key="",
+        llm_model="",
+    )
+    from fastapi.testclient import TestClient
+
+    with TestClient(create_app(settings, embedder=FakeEmbedder())) as client:
+        renamed = client.post("/api/pipeline/local-match/rename", params={"root": str(root)})
+    assert renamed.status_code == 200
+    body = renamed.json()
+    target = root / "公告中" / PINGTUNG_NOTION
+    assert target.is_dir()
+    assert (target / "1150921公開閱覽" / "申請須知.txt").read_text(encoding="utf-8") == "屏東"
+    assert not (root / "公告中" / PINGTUNG_FOLDER).exists()
+    assert [item["to_name"] for item in body["renamed"]] == [PINGTUNG_NOTION]
+    assert body["notion_without_folder"] == []
+    assert body["skipped"] == []

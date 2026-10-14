@@ -327,6 +327,13 @@
       out.textContent = res.ok ? formatCases(body) : explainScan(res.status, body);
     }
 
+    function matchHow(kind, done) {
+      if (kind === "land") return done ? "地號相同" : "地號";
+      if (kind === "admin") return done ? "縣市相同" : "縣市";
+      if (kind === "loose") return done ? "符號相同" : "符號";
+      return done ? "頁名相同" : "頁名";
+    }
+
     function formatMatch(payload) {
       const lines = [];
       if (payload.renamed) {
@@ -347,8 +354,7 @@
       lines.push("可改成 Notion 案名 " + renames.length + " 件");
       lines.push("按「改成 Notion 案名」才會改資料夾。對得上、名稱不同的都會改，包含少寫的縣、市。不把分析內容寫進頁面。");
       renames.forEach((item) => {
-        const how = item.matched_by === "land" ? "地號" : (item.matched_by === "admin" ? "縣市" : "頁名");
-        lines.push("（" + how + "）" + item.from_name + " → " + item.to_name);
+        lines.push("（" + matchHow(item.matched_by) + "）" + item.from_name + " → " + item.to_name);
       });
       lines.push("");
       const matched = payload.matched || [];
@@ -356,8 +362,7 @@
       lines.push("招商情形不是招標完成，而且對上一個資料夾。");
       matched.forEach((item) => {
         const docs = (item.documents || []).map((doc) => doc.filename + "（" + doc.doc_kind + "）").join("、") || "沒有 PDF/txt";
-        const how = item.matched_by === "land" ? "地號" : (item.matched_by === "admin" ? "縣市" : "頁名");
-        lines.push("（" + how + "）" + (item.status || "未填招商情形") + " / " + item.case_name);
+        lines.push("（" + matchHow(item.matched_by) + "）" + (item.status || "未填招商情形") + " / " + item.case_name);
         lines.push("  資料夾：" + item.folder_name);
         lines.push("  " + item.case_type + " / " + item.city);
         lines.push("  " + docs);
@@ -365,16 +370,24 @@
       const missingFolder = payload.notion_without_folder || [];
       lines.push("");
       lines.push("進行中，Notion 有、資料夾沒有 " + missingFolder.length + " 件");
-      lines.push("這些頁不是招標完成，D: 沒有對得上的資料夾。");
+      lines.push("這些頁不是招標完成。還沒有唯一對上的資料夾。縮排是掃描有看到、名稱接近的夾。");
       missingFolder.forEach((item) => {
         lines.push((item.status || "未填招商情形") + " / " + item.case_name);
+        const near = item.near_folders || [];
+        if (!near.length) {
+          lines.push("  掃描沒有看到相近的資料夾。");
+          return;
+        }
+        near.forEach((folder) => {
+          lines.push("  掃到：" + folder.case_type + " / " + (folder.city || "沒有縣市層") + " / " + folder.case_name);
+        });
       });
       const completedFolders = payload.folder_completed || [];
       lines.push("");
       lines.push("招標完成，資料夾也有 " + completedFolders.length + " 件");
       lines.push("Notion 有這一頁，招商情形是招標完成，所以沒有放進「進行中，已對上」。");
       completedFolders.forEach((item) => {
-        const how = item.matched_by === "land" ? "地號相同" : (item.matched_by === "admin" ? "縣市相同" : "頁名相同");
+        const how = matchHow(item.matched_by, true);
         lines.push(item.case_type + " / " + item.city + " / " + item.folder_name);
         lines.push("  Notion：" + item.case_name + "（" + how + "）");
       });

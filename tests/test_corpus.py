@@ -8,8 +8,10 @@ from pathlib import Path
 from rag_server.corpus import (
     classify_document,
     folder_date_ordinal,
+    folders_for_local_match,
     merge_document_texts,
     normalize_city,
+    retarget_folders_named_like,
     scan_cases_root,
 )
 from rag_server.service import CaseService
@@ -265,3 +267,45 @@ def test_detect_ingest_extract_use_latest_viewing_copy(client, tmp_path: Path):
     assert "舊申請須知" not in text
     assert "舊評選" not in text
     assert "頂層舊須知" not in text
+
+
+def test_local_match_promotes_a_case_whose_only_child_is_a_viewing_folder(tmp_path: Path):
+    title = "臺南市新化區虎頭埤湖濱旅館BOT案"
+    viewing = tmp_path / "前置作業" / title / "1150921公開閱覽"
+    viewing.mkdir(parents=True)
+    (viewing / "申請須知.txt").write_text("虎", encoding="utf-8")
+    cases = folders_for_local_match(tmp_path)
+    assert [case.case_name for case in cases] == [title]
+    assert [document.filename for document in cases[0].documents] == ["申請須知.txt"]
+
+
+def test_local_match_reads_a_case_folder_with_files_and_no_city_level(tmp_path: Path):
+    title = "高速鐵路嘉義車站特定區事業發展用地開發經營案"
+    folder = tmp_path / "前置作業" / title
+    folder.mkdir(parents=True)
+    (folder / "需求說明書.txt").write_text("嘉", encoding="utf-8")
+    cases = folders_for_local_match(tmp_path)
+    assert [case.case_name for case in cases] == [title]
+    assert cases[0].city == ""
+
+
+def test_local_match_keeps_real_cases_under_a_city_folder(tmp_path: Path):
+    title = "臺南市南區鹽埕段210-1地號等4筆土地國有土地合作開發案"
+    viewing = tmp_path / "1.都市更新" / "00臺南市" / title / "1150921公開閱覽"
+    viewing.mkdir(parents=True)
+    (viewing / "申請須知.txt").write_text("鹽", encoding="utf-8")
+    cases = folders_for_local_match(tmp_path)
+    assert [case.case_name for case in cases] == [title]
+    assert cases[0].city == "臺南市"
+
+
+def test_retarget_uses_the_parent_when_that_folder_was_renamed_to_the_page(tmp_path: Path):
+    title = "高速鐵路雲林車站特定區車站專用區(三)開發經營案"
+    nested = tmp_path / "前置作業" / title / "附件"
+    nested.mkdir(parents=True)
+    (nested / "申請須知.txt").write_text("雲", encoding="utf-8")
+    scanned = folders_for_local_match(tmp_path)
+    assert [case.case_name for case in scanned] == ["附件"]
+    cases = retarget_folders_named_like(tmp_path, scanned, lambda name: name == title)
+    assert [case.case_name for case in cases] == [title]
+    assert [document.filename for document in cases[0].documents] == ["申請須知.txt"]

@@ -28,6 +28,9 @@ def test_status_page_lists_ready_and_phase2(client):
     assert "招標完成，資料夾也有" in page
     assert "資料夾有、Notion 完全沒有" in page
     assert "進行中，已對上" in page
+    assert "還沒有唯一對上的資料夾" in page
+    assert "掃描沒有看到相近的資料夾" in page
+    assert "掃到：" in page
     assert "/api/pipeline/local-match" in page
 
 

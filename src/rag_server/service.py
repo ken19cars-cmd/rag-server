@@ -13,16 +13,24 @@ from rag_server.completed import (
     OPEN_STATUS_FILTER,
     CompletedCase,
     SearchBackend,
+    case_match_key,
     cases_from_notion_query,
     describe_completed_folders,
     fetch_notion_database,
     load_case_file,
+    loose_match_key,
     pair_notion_pages_to_folders,
     research_case,
     windows_folder_name,
 )
 from rag_server.config import Settings
-from rag_server.corpus import CorpusCase, merge_document_texts, scan_cases_root
+from rag_server.corpus import (
+    CorpusCase,
+    folders_for_local_match,
+    merge_document_texts,
+    retarget_folders_named_like,
+    scan_cases_root,
+)
 from rag_server.crawler import CrawledDocument, Crawler, Fetcher, HttpFetcher
 from rag_server.embeddings import Embedder
 from rag_server.llm import LlmClient
@@ -47,6 +55,19 @@ class CaseNotFound(Exception):
 
 class IngestError(Exception):
     pass
+
+
+def _folders_for_pages(root_path: Path, pages: list[CompletedCase]) -> list:
+    """Level scan, plus a directory whose name is already a Notion title."""
+    keys = {case_match_key(page.case_name) for page in pages if page.case_name.strip()}
+    loose_keys = {loose_match_key(page.case_name) for page in pages if page.case_name.strip()}
+
+    def hits(name: str) -> bool:
+        if not str(name).strip():
+            return False
+        return case_match_key(name) in keys or loose_match_key(name) in loose_keys
+
+    return retarget_folders_named_like(root_path, folders_for_local_match(root_path), hits)
 
 
 def _classify_folders(open_pages: list[CompletedCase], completed_pages: list[CompletedCase], folders: list) -> dict:
@@ -470,7 +491,11 @@ class CaseService:
         open_pages, completed_pages, folders, root_path = self._pages_and_folders(root)
         paired = _classify_folders(open_pages, completed_pages, folders)
         renamed, skipped = self._rename_paired_folders(paired["renames"], root_path)
-        result = _classify_folders(open_pages, completed_pages, scan_cases_root(root_path))
+        result = _classify_folders(
+            open_pages,
+            completed_pages,
+            _folders_for_pages(root_path, open_pages + completed_pages),
+        )
         result["renamed"] = renamed
         result["skipped"] = skipped
         return result
@@ -496,7 +521,8 @@ class CaseService:
         open_pages = cases_from_notion_query(open_payload, completed_only=False)
         completed_pages = cases_from_notion_query(completed_payload, completed_only=True)
         root_path = self._cases_root(root).resolve()
-        return open_pages, completed_pages, scan_cases_root(root_path), root_path
+        folders = _folders_for_pages(root_path, open_pages + completed_pages)
+        return open_pages, completed_pages, folders, root_path
 
     def _rename_paired_folders(self, renames: list[dict], root_path: Path) -> tuple[list[dict], list[dict]]:
         renamed: list[dict] = []
@@ -515,8 +541,7 @@ class CaseService:
             if not source_resolved.is_dir() or not source_resolved.is_relative_to(root_path):
                 skipped.append({**item, "reason": "資料夾不在 CASES_ROOT 裡"})
                 continue
-            parents = source_resolved.parents
-            if len(parents) < 3 or parents[2] != root_path:
+            if source_resolved == root_path or source_resolved.parent == root_path:
                 skipped.append({**item, "reason": "只改案件夾，不改上層資料夾"})
                 continue
             if source_resolved.name == target_name:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -94,6 +95,162 @@ def scan_cases_root(root: Path) -> list[CorpusCase]:
                     )
                 )
     return cases
+
+
+def _is_filing_bucket(name: str) -> bool:
+    """A dated 公開閱覽 folder, or a bare date folder, is not a case name."""
+    if "公開閱覽" in name:
+        leftover = re.sub(r"[\d.\-/／\s年月日()（）第次]", "", name.replace("公開閱覽", ""))
+        return leftover == ""
+    compact = re.sub(r"[\s.\-/／]", "", name)
+    return bool(re.fullmatch(r"\d{6,8}", compact) and folder_date_ordinal(name) is not None)
+
+
+def case_at(root: Path, directory: Path) -> CorpusCase:
+    """One case folder, including PDFs nested under it."""
+    root = root.expanduser().resolve()
+    directory = directory.expanduser().resolve()
+    relative = directory.relative_to(root)
+    case_type = relative.parts[0] if relative.parts else ""
+    city_folder = relative.parts[1] if len(relative.parts) >= 3 else ""
+    return CorpusCase(
+        case_type=case_type,
+        city=normalize_city(city_folder) if city_folder else "",
+        city_folder=city_folder,
+        case_name=directory.name,
+        folder=directory,
+        documents=_documents_in_case(case_type, city_folder or directory.parent.name, directory),
+    )
+
+
+def folders_for_local_match(root: Path) -> list[CorpusCase]:
+    """Case folders for Notion pairing.
+
+    The level scan is 類型 / 縣市 / 案名. A renamed folder is still a case
+    when it sits directly under a type folder and the only directories inside
+    it are 公開閱覽 folders, or when the PDFs sit in that folder with no
+    further directories. A city folder that already holds real case names
+    stays a city folder.
+    """
+    root = root.expanduser().resolve()
+    scanned = scan_cases_root(root)
+    by_parent: dict[Path, list[CorpusCase]] = {}
+    for case in scanned:
+        by_parent.setdefault(case.folder.resolve().parent, []).append(case)
+
+    dropped: set[Path] = set()
+    promoted: list[CorpusCase] = []
+    for parent, children in by_parent.items():
+        try:
+            relative = parent.relative_to(root)
+        except ValueError:
+            continue
+        if len(relative.parts) < 2:
+            continue
+        if not children or not all(_is_filing_bucket(child.case_name) for child in children):
+            continue
+        dropped.update(child.folder.resolve() for child in children)
+        promoted.append(case_at(root, parent))
+
+    kept = [case for case in scanned if case.folder.resolve() not in dropped]
+    known = {case.folder.resolve() for case in kept}
+    known.update(case.folder.resolve() for case in promoted)
+    ancestors: set[Path] = set()
+    for folder in known:
+        ancestors.update(folder.parents)
+
+    extras: list[CorpusCase] = []
+    for type_dir in sorted(path for path in root.iterdir() if path.is_dir()):
+        if type_dir.name in SKIP_DIR_NAMES or type_dir.name.startswith("."):
+            continue
+        for child in sorted(path for path in type_dir.iterdir() if path.is_dir()):
+            if child.name in SKIP_DIR_NAMES or child.name.startswith("."):
+                continue
+            resolved = child.resolve()
+            if resolved in known or resolved in ancestors:
+                continue
+            nested = [
+                path
+                for path in child.iterdir()
+                if path.is_dir() and path.name not in SKIP_DIR_NAMES and not path.name.startswith(".")
+            ]
+            if nested:
+                continue
+            has_file = any(path.is_file() and path.suffix.lower() in ALLOWED_SUFFIXES for path in child.iterdir())
+            if not has_file:
+                continue
+            extras.append(case_at(root, resolved))
+    return kept + promoted + extras
+
+
+def retarget_folders_named_like(root: Path, cases: list[CorpusCase], hits) -> list[CorpusCase]:
+    """Use a directory whose name is a page title when the level scan missed it.
+
+    ``hits(name)`` is true when that name is a Notion title. A parent replaces
+    its scanned children only when the parent hits and none of the children do.
+    A scanned case that misses is replaced by a nested directory that hits.
+    """
+    root = root.expanduser().resolve()
+    by_parent: dict[Path, list[CorpusCase]] = {}
+    for case in cases:
+        by_parent.setdefault(case.folder.resolve().parent, []).append(case)
+
+    consumed: set[Path] = set()
+    result: list[CorpusCase] = []
+    seen: set[Path] = set()
+    for parent, children in by_parent.items():
+        try:
+            relative = parent.relative_to(root)
+        except ValueError:
+            continue
+        if len(relative.parts) < 2 or not hits(parent.name):
+            continue
+        if any(hits(child.case_name) for child in children):
+            continue
+        resolved = parent.resolve()
+        if resolved in seen:
+            continue
+        result.append(case_at(root, parent))
+        seen.add(resolved)
+        consumed.update(child.folder.resolve() for child in children)
+
+    for case in cases:
+        resolved = case.folder.resolve()
+        if resolved in consumed:
+            continue
+        if hits(case.case_name):
+            if resolved not in seen:
+                result.append(case)
+                seen.add(resolved)
+            continue
+        found: list[Path] = []
+        for _current, dirnames, _filenames in os.walk(resolved):
+            current = Path(_current)
+            kept: list[str] = []
+            for name in dirnames:
+                if name in SKIP_DIR_NAMES or name.startswith(".") or _is_filing_bucket(name):
+                    continue
+                kept.append(name)
+                directory = (current / name).resolve()
+                if hits(name):
+                    found.append(directory)
+            dirnames[:] = kept
+        replacements = [
+            directory
+            for directory in found
+            if not any(other != directory and other in directory.parents for other in found)
+        ]
+        if not replacements:
+            if resolved not in seen:
+                result.append(case)
+                seen.add(resolved)
+            continue
+        for directory in replacements:
+            if directory in seen:
+                continue
+            result.append(case_at(root, directory))
+            seen.add(directory)
+    return result
 
 
 def folder_date_ordinal(name: str) -> int | None:
