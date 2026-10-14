@@ -35,7 +35,7 @@ from rag_server.crawler import CrawledDocument, Crawler, Fetcher, HttpFetcher
 from rag_server.embeddings import Embedder
 from rag_server.llm import LlmClient
 from rag_server.notion_analysis import analyze_to_notion
-from rag_server.notion_blocks import fetch_block_children, overview_state
+from rag_server.notion_blocks import fetch_block_children, overview_reading
 from rag_server.pdf_extract import ExtractedPage, OcrEngine, TesseractOcrEngine, extract_pdf_bytes
 from rag_server.schemas import (
     AnalysisResponse,
@@ -505,8 +505,12 @@ class CaseService:
         errors: list[dict] = []
         unfilled_pages: list[CompletedCase] = []
         overview_by_id: dict[str, str] = {}
+        intro_skipped = 0
         with httpx.Client(timeout=30.0) as http:
             for page in open_pages:
+                if page.case_name.strip() == "案件介紹":
+                    intro_skipped += 1
+                    continue
                 if not page.notion_page_id:
                     errors.append(_unfilled_page_row(page) | {"error": "頁面沒有 id"})
                     continue
@@ -515,11 +519,12 @@ class CaseService:
                 except RuntimeError as exc:
                     errors.append(_unfilled_page_row(page) | {"error": str(exc)})
                     continue
-                state = overview_state(raw_blocks)
+                reading = overview_reading(raw_blocks, case_name=page.case_name)
+                state = reading["state"]
                 if state == "filled":
-                    filled.append(_unfilled_page_row(page))
+                    filled.append(_unfilled_page_row(page) | {"excerpt": reading["excerpt"]})
                 elif state == "missing_heading":
-                    missing_heading.append(_unfilled_page_row(page))
+                    missing_heading.append(_unfilled_page_row(page) | {"headings": reading["headings"]})
                 else:
                     overview_by_id[page.notion_page_id] = state
                     unfilled_pages.append(page)
@@ -533,6 +538,7 @@ class CaseService:
             ],
             "filled": filled,
             "missing_heading": missing_heading,
+            "intro_skipped": intro_skipped,
             "errors": errors,
         }
 

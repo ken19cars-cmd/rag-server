@@ -9,7 +9,7 @@ import httpx
 from rag_server.config import Settings
 from rag_server.embeddings import FakeEmbedder
 from rag_server.main import create_app
-from rag_server.notion_blocks import fetch_block_children, overview_state
+from rag_server.notion_blocks import fetch_block_children, overview_reading, overview_state
 
 
 def _rich(text: str) -> dict:
@@ -82,6 +82,21 @@ def test_applied_template_is_not_case_content():
         _bullet("本案位於示範區。", "b-real"),
     ]
     assert overview_state(written_as_bullets) == "filled"
+    assert overview_state(
+        [_heading("❯計畫概述"), _paragraph("頁名就是概述的案")],
+        case_name="頁名就是概述的案",
+    ) == "template"
+    assert overview_state(
+        [_heading("❯計畫概述"), _paragraph("案件名稱：頁名就是概述的案")],
+        case_name="頁名就是概述的案",
+    ) == "template"
+    assert overview_state([_heading("❯計劃概述"), _paragraph("")]) == "empty"
+    reading = overview_reading([_heading("❯計畫概述"), _paragraph("已經寫過。")])
+    assert reading["state"] == "filled"
+    assert reading["excerpt"] == "已經寫過。"
+    missing = overview_reading([_heading("❯其他", "h-other"), _paragraph("不是概述")])
+    assert missing["state"] == "missing_heading"
+    assert missing["headings"] == ["❯其他"]
 
 
 def test_fetch_block_children_follows_the_cursor():
@@ -98,6 +113,26 @@ def test_fetch_block_children_follows_the_cursor():
     assert [block["id"] for block in blocks] == ["h-overview", "p-overview"]
     assert seen[0]["page_size"] == "100"
     assert seen[1]["start_cursor"] == "c2"
+    client.close()
+
+
+def test_fetch_block_children_reads_a_column_template():
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/page-1/children"):
+            block = {"id": "cols", "type": "column_list", "has_children": True, "column_list": {}}
+            return httpx.Response(200, json={"results": [block], "has_more": False})
+        if path.endswith("/cols/children"):
+            block = {"id": "col", "type": "column", "has_children": True, "column": {}}
+            return httpx.Response(200, json={"results": [block], "has_more": False})
+        return httpx.Response(
+            200,
+            json={"results": [_heading("❯計畫概述"), _paragraph("")], "has_more": False},
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    blocks = fetch_block_children("secret", "page-1", client=client)
+    assert overview_state(blocks) == "empty"
     client.close()
 
 
@@ -128,6 +163,7 @@ def test_unfilled_route_lists_blank_pages_and_skips_filled_ones(tmp_path: Path, 
         "page-orphan": [_heading("❯計畫概述"), _paragraph("")],
         "page-no-heading": [_heading("❯其他", "h-other"), _paragraph("不是概述")],
         "page-broken": [_heading("❯計畫概述")],
+        "page-title": [_heading("❯計畫概述"), _paragraph("頁名就是概述的案")],
     }
     seen_blocks: list[str] = []
 
@@ -140,6 +176,8 @@ def test_unfilled_route_lists_blank_pages_and_skips_filled_ones(tmp_path: Path, 
                 _page("page-orphan", "沒有資料夾的空白案", "進行中"),
                 _page("page-no-heading", "沒有概述標題", "前置作業"),
                 _page("page-broken", "標題下沒有段落", "前置作業"),
+                _page("page-title", "頁名就是概述的案", "前置作業"),
+                _page("page-intro", "案件介紹", "公告中"),
                 _page("page-done", "招標完成案", "招標完成"),
             ],
             "has_more": False,
@@ -175,13 +213,19 @@ def test_unfilled_route_lists_blank_pages_and_skips_filled_ones(tmp_path: Path, 
         "只有範本提示的案",
         "沒有資料夾的空白案",
         "標題下沒有段落",
+        "頁名就是概述的案",
     ]
     assert body["unfilled_without_folder"][0]["overview"] == "template"
     assert body["unfilled_without_folder"][2]["overview"] == "missing_paragraph"
+    assert body["unfilled_without_folder"][3]["overview"] == "template"
     assert [item["case_name"] for item in body["filled"]] == ["已經填過的案"]
+    assert body["filled"][0]["excerpt"] == "已經寫過。"
     assert [item["case_name"] for item in body["missing_heading"]] == ["沒有概述標題"]
+    assert body["missing_heading"][0]["headings"] == ["❯其他"]
+    assert body["intro_skipped"] == 1
     assert body["errors"] == []
     assert "page-done" not in seen_blocks
+    assert "page-intro" not in seen_blocks
     assert blank.is_dir()
 
     bare = Settings(

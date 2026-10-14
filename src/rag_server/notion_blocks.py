@@ -7,8 +7,12 @@ import unicodedata
 
 import httpx
 
-from rag_server.completed import NOTION_VERSION
-from rag_server.notion_analysis import TemplateBlock, _following, _heading_index, parse_template_blocks
+from rag_server.completed import NOTION_VERSION, case_match_key
+from rag_server.notion_analysis import TemplateBlock, parse_template_blocks
+
+_CONTAINER_TYPES = frozenset({"column_list", "column", "synced_block", "toggle", "table"})
+_MAX_NESTING = 4
+_TITLE_PREFIX = re.compile(r"^(?:案件名稱|案名|案件)\s*[:：]\s*")
 
 # Lines the blank case template and the analysis prompt use as labels or hints.
 # A page that only repeats these has had the template applied, not written.
@@ -62,36 +66,12 @@ def fetch_block_children(
     *,
     client: httpx.Client | None = None,
 ) -> list[dict]:
-    """Return the direct children of a Notion block, following next_cursor."""
+    """Return a page's blocks, including blocks nested in columns, toggles, and tables."""
     owns = client is None
     http = client or httpx.Client(timeout=30.0)
-    results: list[dict] = []
-    cursor = None
     try:
-        while True:
-            params: dict[str, str | int] = {"page_size": 100}
-            if cursor:
-                params["start_cursor"] = cursor
-            response = http.get(
-                f"https://api.notion.com/v1/blocks/{block_id}/children",
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Notion-Version": NOTION_VERSION,
-                },
-                params=params,
-            )
-            if response.status_code >= 400:
-                detail = response.text[:180].replace("\n", " ")
-                raise RuntimeError(f"notion blocks failed: {response.status_code} {detail}")
-            payload = response.json()
-            if not isinstance(payload, dict):
-                raise RuntimeError("notion blocks did not return an object")
-            results.extend(item for item in (payload.get("results") or []) if isinstance(item, dict))
-            if not payload.get("has_more"):
-                return results
-            cursor = payload.get("next_cursor")
-            if not cursor:
-                return results
+        direct = _fetch_direct_children(token, block_id, http)
+        return _expand_containers(token, direct, http)
     except httpx.HTTPError as exc:
         raise RuntimeError(f"notion blocks failed: {exc}") from exc
     finally:
@@ -99,31 +79,157 @@ def fetch_block_children(
             http.close()
 
 
-def overview_state(raw_blocks: list[dict]) -> str:
-    """Whether ❯計畫概述 already describes this case.
+def _fetch_direct_children(token: str, block_id: str, http: httpx.Client) -> list[dict]:
+    """Return the direct children of a Notion block, following next_cursor."""
+    results: list[dict] = []
+    cursor = None
+    while True:
+        params: dict[str, str | int] = {"page_size": 100}
+        if cursor:
+            params["start_cursor"] = cursor
+        response = http.get(
+            f"https://api.notion.com/v1/blocks/{block_id}/children",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Notion-Version": NOTION_VERSION,
+            },
+            params=params,
+        )
+        if response.status_code >= 400:
+            detail = response.text[:180].replace("\n", " ")
+            raise RuntimeError(f"notion blocks failed: {response.status_code} {detail}")
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("notion blocks did not return an object")
+        results.extend(item for item in (payload.get("results") or []) if isinstance(item, dict))
+        if not payload.get("has_more"):
+            return results
+        cursor = payload.get("next_cursor")
+        if not cursor:
+            return results
 
-    ``filled`` has case prose. ``template`` has only the applied template: gray
-    placeholder text, or the template's own hint and label lines. ``empty`` is a
-    blank paragraph. ``missing_paragraph`` has the heading and no body under it.
-    ``missing_heading`` has no ❯計畫概述.
+
+def _expand_containers(token: str, blocks: list[dict], http: httpx.Client, depth: int = 0) -> list[dict]:
+    if depth >= _MAX_NESTING:
+        return blocks
+    expanded: list[dict] = []
+    for block in blocks:
+        expanded.append(block)
+        if not _is_container(block):
+            continue
+        block_id = str(block.get("id") or "").strip()
+        if not block_id:
+            continue
+        children = _fetch_direct_children(token, block_id, http)
+        expanded.extend(_expand_containers(token, children, http, depth + 1))
+    return expanded
+
+
+def _is_container(block: dict) -> bool:
+    if not block.get("has_children"):
+        return False
+    block_type = str(block.get("type") or "")
+    if block_type in _CONTAINER_TYPES:
+        return True
+    if not block_type.startswith("heading"):
+        return False
+    typed = block.get(block_type)
+    return isinstance(typed, dict) and bool(typed.get("is_toggleable"))
+
+
+def overview_state(raw_blocks: list[dict], case_name: str = "") -> str:
+    """Whether ❯計畫概述 already describes this case."""
+    return overview_reading(raw_blocks, case_name=case_name)["state"]
+
+
+def overview_reading(raw_blocks: list[dict], case_name: str = "") -> dict:
+    """Classify ❯計畫概述 and keep a short quote of any case prose.
+
+    ``filled`` has case prose. ``excerpt`` is that prose, clipped.
+    ``template`` is the applied template: gray placeholder text, the template's
+    own hint and label lines, or text that only repeats the page title.
+    ``empty`` is a blank paragraph. ``missing_paragraph`` has the heading and no
+    body under it. ``missing_heading`` has no 計畫概述; ``headings`` lists the
+    headings that were on the page.
     """
     blocks = parse_template_blocks(raw_blocks)
-    if _heading_index(blocks, "計畫概述") is None:
-        return "missing_heading"
-    body = [block for block in _following(blocks, "計畫概述") if _is_content_block(block)]
-    if not body:
-        return "missing_paragraph"
+    headings = [block.text for block in blocks if block.type.startswith("heading") and block.text][:8]
+    body = _body_after_overview(blocks)
+    if body is None:
+        return {"state": "missing_heading", "excerpt": "", "headings": headings}
+    content = [block for block in body if _is_content_block(block)]
+    if not content:
+        return {"state": "missing_paragraph", "excerpt": "", "headings": []}
     raw_by_id = {
         str(item.get("id") or ""): item
         for item in raw_blocks
         if isinstance(item, dict)
     }
-    verdicts = [_block_verdict(raw_by_id.get(block.id, {}), block) for block in body]
-    if "content" in verdicts:
-        return "filled"
-    if "scaffold" in verdicts:
-        return "template"
-    return "empty"
+    prose: list[str] = []
+    saw_scaffold = False
+    for block in content:
+        verdict = _block_verdict(raw_by_id.get(block.id, {}), block)
+        if verdict == "content":
+            text = _prose_text(raw_by_id.get(block.id, {}), block)
+            if text:
+                prose.append(text)
+        elif verdict == "scaffold":
+            saw_scaffold = True
+    if prose and not _is_only_case_name("\n".join(prose), case_name):
+        return {"state": "filled", "excerpt": _clip(" ".join(prose)), "headings": []}
+    if prose or saw_scaffold:
+        return {"state": "template", "excerpt": "", "headings": []}
+    return {"state": "empty", "excerpt": "", "headings": []}
+
+
+def _body_after_overview(blocks: list[TemplateBlock]) -> list[TemplateBlock] | None:
+    start = _overview_heading_index(blocks)
+    if start is None:
+        return None
+    found: list[TemplateBlock] = []
+    for block in blocks[start + 1 :]:
+        if block.type.startswith("heading"):
+            break
+        found.append(block)
+    return found
+
+
+def _overview_heading_index(blocks: list[TemplateBlock]) -> int | None:
+    for index, block in enumerate(blocks):
+        if not block.type.startswith("heading"):
+            continue
+        folded = re.sub(r"[\s❯*#／]", "", block.text.replace("/", "")).replace("計劃", "計畫")
+        if "計畫概述" in folded:
+            return index
+    return None
+
+
+def _prose_text(raw: dict, block: TemplateBlock) -> str:
+    parts = [_visible(text) for kind, text in _iter_spans(raw, block) if kind != "placeholder"]
+    return "\n".join(part for part in parts if part)
+
+
+def _is_only_case_name(text: str, case_name: str) -> bool:
+    title = case_match_key(case_name)
+    if not title:
+        return False
+    pieces = _pieces(text)
+    if not pieces:
+        return False
+    for piece in pieces:
+        if _is_scaffold_piece(piece):
+            continue
+        stripped = _TITLE_PREFIX.sub("", piece.strip())
+        if case_match_key(stripped) != title:
+            return False
+    return True
+
+
+def _clip(text: str, limit: int = 80) -> str:
+    compact = " ".join(text.split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 1] + "…"
 
 
 def _is_content_block(block: TemplateBlock) -> bool:

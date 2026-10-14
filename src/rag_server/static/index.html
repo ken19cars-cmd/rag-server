@@ -157,7 +157,7 @@
         <article>
           <h3>未完成頁對上資料夾</h3>
           <p><code>GET /api/pipeline/local-match</code>。進行中的頁先對頁名，再對地號，再把少寫的縣、市補上。招標完成的頁另外列出。這個對照不改資料夾名稱，也不把分析內容寫進頁面。</p>
-          <p><code>GET /api/pipeline/unfilled</code>。進行中的頁再讀 blocks。❯計畫概述底下要有這個案子自己的文字，才算已填。套用範本不算有內容，這種頁一樣列在還沒填，並對上案件夾。已經寫了本案內容的頁列出來，這次不寫。不更新 Notion。</p>
+          <p><code>GET /api/pipeline/unfilled</code>。進行中的頁再讀 blocks，欄位和折疊裡的標題也算。❯計畫概述底下要有這個案子自己的文字，才算已填。套用範本、或概述只有頁名，都算還沒填。已經寫了的頁會附上那段概述。不更新 Notion。</p>
         </article>
         <article>
           <h3>PDF 寫入與合併</h3>
@@ -431,6 +431,7 @@
       lines.push("計畫概述已寫了本案內容 " + filled.length + " 件，這次不寫。");
       filled.forEach((item) => {
         lines.push((item.status || "未填招商情形") + " / " + item.case_name);
+        if (item.excerpt) lines.push("  概述：" + item.excerpt);
       });
       const missingHeading = payload.missing_heading || [];
       if (missingHeading.length) {
@@ -438,7 +439,14 @@
         lines.push("沒有 ❯計畫概述 " + missingHeading.length + " 件");
         missingHeading.forEach((item) => {
           lines.push((item.status || "未填招商情形") + " / " + item.case_name);
+          const heads = item.headings || [];
+          if (heads.length) lines.push("  讀到的標題：" + heads.join("、"));
+          else lines.push("  最外層沒有標題。");
         });
+      }
+      if (payload.intro_skipped) {
+        lines.push("");
+        lines.push("案件介紹不是案件頁，略過。");
       }
       const errors = payload.errors || [];
       if (errors.length) {
