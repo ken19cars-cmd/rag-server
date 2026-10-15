@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import httpx
@@ -324,6 +325,66 @@ def test_unfilled_analyze_uses_real_block_ids_and_does_not_write(tmp_path: Path,
     assert "招商情形" not in analyzed.text
     assert "編輯者" not in analyzed.text
     assert "廠商數量" not in analyzed.text
+    assert body["sections"][0]["pageId"] == "page-blank"
+    assert [item["heading"] for item in body["sections"][0]["headings"]] == ["計畫概述"]
+    assert "公辦都市更新" in body["sections"][0]["headings"][0]["text"]
     assert body["skipped"] == []
     assert body["errors"] == []
     assert written.status_code == 501
+
+
+def test_unfilled_analyze_lists_every_template_heading(tmp_path: Path, monkeypatch):
+    root = tmp_path / "cases"
+    folder = root / "1.都市更新" / "00彰化縣" / "彰化示範都更案"
+    folder.mkdir(parents=True)
+    source = Path(__file__).parent / "fixtures"
+    text = (source / "synthetic_case.txt").read_text(encoding="utf-8")
+    text = text.replace("意願調查：私有土地所有權人同意比例90%（9/10人）。\n", "")
+    (folder / "申請須知.txt").write_text(text, encoding="utf-8")
+    template = json.loads((source / "template_blocks.json").read_text(encoding="utf-8"))
+
+    def fake_fetch(token, database_id, *, client=None, status_filter=None):
+        return {"results": [_page("page-blank", "彰化示範都更案", "公告中")], "has_more": False}
+
+    def fake_blocks(token, block_id, *, client=None):
+        return template
+
+    monkeypatch.setattr("rag_server.service.fetch_notion_database", fake_fetch)
+    monkeypatch.setattr("rag_server.service.fetch_block_children", fake_blocks)
+    settings = Settings(
+        data_dir=str(tmp_path / "data"),
+        embedding_backend="fake",
+        notion_token="secret",
+        notion_database_id="db123",
+        llm_base_url="",
+        llm_api_key="",
+        llm_model="",
+    )
+    from fastapi.testclient import TestClient
+
+    with TestClient(create_app(settings, embedder=FakeEmbedder())) as client:
+        analyzed = client.post("/api/pipeline/unfilled/analyze", params={"root": str(root)})
+    assert analyzed.status_code == 200
+    body = analyzed.json()
+    result = body["analyses"][0]
+    assert set(result) == {"pageId", "caseName", "baseTable", "landUseTable", "updates"}
+    headings = body["sections"][0]["headings"]
+    assert [item["heading"] for item in headings] == [
+        "計畫概述",
+        "基地基本資料",
+        "周邊環境概況",
+        "使用強度規範",
+        "意願調查",
+        "開發定位/規劃構想",
+        "開發權利義務/負擔條件",
+        "期程規範",
+        "財務條件",
+        "申請人資格",
+    ]
+    by_heading = {item["heading"]: item["text"] for item in headings}
+    assert "示範市住宅中心" in by_heading["計畫概述"]
+    assert "示範更新基地" in by_heading["基地基本資料"]
+    assert "建蔽率60%" in by_heading["使用強度規範"]
+    assert by_heading["意願調查"] == ""
+    assert "簽約日起3個月內" in by_heading["期程規範"]
+    assert "財務資格" in by_heading["申請人資格"]

@@ -14,6 +14,7 @@ from rag_server.notion_analysis import (
     extractive_notion_analysis,
     load_analysis_prompt,
     parse_template_blocks,
+    section_lines,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -128,6 +129,44 @@ def test_synthetic_case_matches_filled_page_shape():
     assert "或" in tech
     assert "10,000平方公尺" in tech
     assert "5億元" in tech
+
+
+def test_section_lines_cover_every_template_heading():
+    result = _analyze()
+    lines = section_lines(result, parse_template_blocks(BLOCKS))
+    assert [item["heading"] for item in lines] == list(SECTION_ORDER)
+    by_heading = {item["heading"]: item["text"] for item in lines}
+    assert "示範市住宅中心" in by_heading["計畫概述"]
+    assert "示範更新基地" in by_heading["基地基本資料"]
+    assert "800平方公尺" in by_heading["基地基本資料"]
+    assert "100%" in by_heading["基地基本資料"]
+    assert "平方" not in by_heading["基地基本資料"].split("權屬", 1)[-1]
+    assert "示範路" in by_heading["周邊環境概況"]
+    assert "建蔽率60%" in by_heading["使用強度規範"]
+    assert "☑ 都市更新容積獎勵" in by_heading["使用強度規範"]
+    assert "同意比例90%" in by_heading["意願調查"]
+    assert "退縮開放空間" in by_heading["開發定位/規劃構想"]
+    assert "實施與權益分配" in by_heading["開發權利義務/負擔條件"]
+    assert "拆遷安置補貼義務" in by_heading["開發權利義務/負擔條件"]
+    assert "簽約日起3個月內" in by_heading["期程規範"]
+    assert "保證金" not in by_heading["期程規範"]
+    assert "申請保證金" in by_heading["財務條件"]
+    assert "財務資格" in by_heading["申請人資格"]
+    assert "實收資本額" in by_heading["申請人資格"]
+
+
+def test_section_lines_leave_missing_pdf_text_blank():
+    result = _analyze("")
+    lines = section_lines(result, parse_template_blocks(BLOCKS))
+    assert [item["heading"] for item in lines] == list(SECTION_ORDER)
+    assert all(item["text"] == "" for item in lines)
+
+
+def test_section_lines_skip_headings_missing_from_the_page():
+    result = _analyze()
+    lines = section_lines(result, parse_template_blocks(BLOCKS[:2]))
+    assert [item["heading"] for item in lines] == ["計畫概述"]
+    assert set(result) == {"pageId", "caseName", "baseTable", "landUseTable", "updates"}
 
 
 def test_empty_pdf_keeps_ids_and_writes_nothing():

@@ -216,8 +216,8 @@ def _add_paragraph(updates: list[dict], blocks: list[TemplateBlock], heading: st
 
 
 def _add_duty_rows(updates: list[dict], blocks: list[TemplateBlock], items: list[tuple[str, str]]) -> None:
-    rows = _rows_after(blocks, "開發權利義務")[:6]
-    for row, (title, body) in zip(rows, items[:6]):
+    rows = _rows_after(blocks, "開發權利義務")
+    for row, (title, body) in zip(rows, items):
         _put_row(updates, row, 0, title, "PDF 有此權利義務標題")
         _put_row(updates, row, 1, body, "PDF 有此權利義務內容")
 
@@ -374,7 +374,7 @@ def _positioning(text: str) -> str:
 def _duty_items(text: str) -> list[tuple[str, str]]:
     matches = list(re.finditer(r"(?m)^(\d+)\.\s*([^：:\n]{2,40})[:：]\s*(.+)$", text))
     items: list[tuple[str, str]] = []
-    for match in matches[:6]:
+    for match in matches:
         title = f"{match.group(1)}. {match.group(2).strip()}"
         sentences = [part.strip() for part in re.split(r"(?<=。)", match.group(3).strip()) if part.strip()]
         items.append((title, _bullets(sentences)))
@@ -491,6 +491,95 @@ def _rich_text(value: object) -> str:
         if "plain_text" in value:
             return str(value.get("plain_text") or "").strip()
     return ""
+
+
+def section_lines(result: dict, blocks: list[TemplateBlock]) -> list[dict]:
+    """One line per template heading that is actually on this page.
+
+    The section-38 JSON stays unchanged. This is only the readout for every
+    heading the prompt fills: paragraph, base table, land-use table, or rows.
+    """
+    by_block: dict[str, list[dict]] = {}
+    for item in result.get("updates") or []:
+        if isinstance(item, dict):
+            by_block.setdefault(str(item.get("blockId") or ""), []).append(item)
+    lines: list[dict] = []
+    for heading in SECTION_ORDER:
+        if _heading_index(blocks, heading) is None:
+            continue
+        lines.append({"heading": heading, "text": _section_display(heading, result, blocks, by_block)})
+    return lines
+
+
+def _section_display(
+    heading: str,
+    result: dict,
+    blocks: list[TemplateBlock],
+    by_block: dict[str, list[dict]],
+) -> str:
+    parts: list[str] = []
+    if heading == "基地基本資料":
+        parts.append(_bases_text(result))
+    elif heading == "使用強度規範":
+        parts.append(_zones_text(result))
+    paragraph = _paragraph_after(blocks, heading)
+    if paragraph is not None:
+        values = [str(item.get("value") or "").strip() for item in by_block.get(paragraph.id, [])]
+        parts.extend(value for value in values if value)
+    if heading.startswith("開發權利義務") or heading == "申請人資格":
+        row_text = _row_text(_rows_after(blocks, heading), by_block)
+        if row_text:
+            parts.append(row_text)
+    return "\n".join(part for part in parts if part).strip()
+
+
+def _bases_text(result: dict) -> str:
+    bases = ((result.get("baseTable") or {}).get("bases")) or []
+    chunks: list[str] = []
+    for base in bases:
+        if not isinstance(base, dict):
+            continue
+        rows = [str(base.get("name") or "").strip()]
+        for label, key in (("座落", "location"), ("範圍", "scope"), ("面積", "area"), ("權屬", "ownership")):
+            value = str(base.get(key) or "").strip()
+            if value:
+                rows.append(f"{label}：{value}")
+        text = "\n".join(row for row in rows if row)
+        if text:
+            chunks.append(text)
+    return "\n\n".join(chunks)
+
+
+def _zones_text(result: dict) -> str:
+    zones = ((result.get("landUseTable") or {}).get("zones")) or []
+    chunks: list[str] = []
+    for zone in zones:
+        if not isinstance(zone, dict):
+            continue
+        rows = [str(zone.get("name") or "").strip(), str(zone.get("intensity") or "").strip()]
+        volume = str(zone.get("volumeItems") or "").strip()
+        if volume:
+            rows.append(volume)
+        text = "\n".join(row for row in rows if row)
+        if text:
+            chunks.append(text)
+    return "\n\n".join(chunks)
+
+
+def _row_text(rows: list[TemplateBlock], by_block: dict[str, list[dict]]) -> str:
+    chunks: list[str] = []
+    for row in rows:
+        items = sorted(by_block.get(row.id) or [], key=lambda item: int(item.get("cellIndex") or 0))
+        if not items:
+            continue
+        updated = {int(item.get("cellIndex") or 0) for item in items}
+        values = [str(item.get("value") or "").strip() for item in items if str(item.get("value") or "").strip()]
+        if row.cells and 0 not in updated and row.cells[0].strip():
+            values = [row.cells[0].strip(), *values]
+        line = " | ".join(values)
+        if line:
+            chunks.append(line)
+    return "\n".join(chunks)
 
 
 def _llm_messages(

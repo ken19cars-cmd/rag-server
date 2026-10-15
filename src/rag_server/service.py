@@ -35,7 +35,7 @@ from rag_server.corpus import (
 from rag_server.crawler import CrawledDocument, Crawler, Fetcher, HttpFetcher
 from rag_server.embeddings import Embedder
 from rag_server.llm import LlmClient
-from rag_server.notion_analysis import analyze_to_notion
+from rag_server.notion_analysis import analyze_to_notion, parse_template_blocks, section_lines
 from rag_server.notion_blocks import fetch_block_children, overview_reading
 from rag_server.pdf_extract import ExtractedPage, OcrEngine, TesseractOcrEngine, extract_pdf_bytes
 from rag_server.schemas import (
@@ -579,8 +579,9 @@ class CaseService:
         """Build section-38 JSON for matched pages whose overview is still empty.
 
         The JSON uses that page's real block ids and the local case folder.
-        招商情形、編輯者、廠商數量、日期進度 stay off the JSON. This does not
-        write Notion.
+        A sibling ``sections`` list repeats every template heading actually on
+        the page, including headings the PDF left blank. 招商情形、編輯者、
+        廠商數量、日期進度 stay off the JSON. This does not write Notion.
         """
         listed = self.list_unfilled_notion_cases(root)
         ready = [
@@ -599,6 +600,7 @@ class CaseService:
         ]
         token = self.settings.notion_token.strip()
         analyses: list[dict] = []
+        sections: list[dict] = []
         errors: list[dict] = []
         with httpx.Client(timeout=30.0) as http:
             for item in ready:
@@ -615,7 +617,14 @@ class CaseService:
                     errors.append({"case_name": item["case_name"], "error": str(exc)})
                     continue
                 analyses.append(result)
-        return {"analyses": analyses, "skipped": skipped, "errors": errors}
+                sections.append(
+                    {
+                        "caseName": result["caseName"],
+                        "pageId": result["pageId"],
+                        "headings": section_lines(result, parse_template_blocks(blocks)),
+                    }
+                )
+        return {"analyses": analyses, "sections": sections, "skipped": skipped, "errors": errors}
 
     def match_open_notion_cases(self, root: str = "") -> dict:
         """Pair Notion pages with local case folders, and label 招標完成 separately.

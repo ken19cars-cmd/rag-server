@@ -158,7 +158,7 @@
           <h3>未完成頁對上資料夾</h3>
           <p><code>GET /api/pipeline/local-match</code>。進行中的頁先對頁名，再對地號，再把少寫的縣、市補上。招標完成的頁另外列出。這個對照不改資料夾名稱，也不把分析內容寫進頁面。</p>
           <p><code>GET /api/pipeline/unfilled</code>。只看進行中的頁。招標完成不必套案件介紹範本，不在這一份。捷運聯開這個類別可以沒有 ❯計畫概述，只計件數、不列案名。其他進行中的頁要先有 ❯計畫概述這類標題，伺服器才照標題下面填。還沒套用範本的頁會另列。概述只有範本或頁名，算還沒填。已經寫了本案內容的頁會附上那段概述。不更新 Notion。</p>
-          <p><code>POST /api/pipeline/unfilled/analyze</code>。只分析已對上資料夾、而且概述還沒寫本案內容的頁。用該頁真實的 block id 和本地 PDF。招商情形、編輯者、廠商數量、日期進度不進 JSON。不寫入 Notion。</p>
+          <p><code>POST /api/pipeline/unfilled/analyze</code>。只分析已對上資料夾、而且概述還沒寫本案內容的頁。照該頁 Notion 範本的每個標題整理，包含計畫概述、基地基本資料、周邊環境概況、使用強度規範、意願調查、開發定位/規劃構想、開發權利義務/負擔條件、期程規範、財務條件、申請人資格。PDF 沒有的標題留空。用該頁真實的 block id 和本地 PDF。招商情形、編輯者、廠商數量、日期進度不進 JSON。不寫入 Notion。</p>
         </article>
         <article>
           <h3>PDF 寫入與合併</h3>
@@ -475,16 +475,25 @@
 
     function formatUnfilledAnalysis(payload) {
       const lines = [];
-      lines.push("這個按鈕只做出分析 JSON，不寫入 Notion。");
+      lines.push("照 Notion 範本的每個標題整理。這個按鈕只做出分析 JSON，不寫入 Notion。");
       const analyses = payload.analyses || [];
+      const sections = payload.sections || [];
       lines.push("");
       lines.push("分析 " + analyses.length + " 件");
       analyses.forEach((item) => {
         lines.push(item.caseName || "");
-        const updates = item.updates || [];
-        const overview = updates.find((update) => (update.reason || "").indexOf("計畫概述") >= 0);
-        lines.push("  計畫概述：" + (overview ? overview.value : "PDF 沒有這段，留空"));
-        lines.push("  更新 " + updates.length + " 筆");
+        const readout = sections.find((row) => row.pageId === item.pageId);
+        const headings = (readout && readout.headings) || [];
+        if (!headings.length) lines.push("  這頁沒有範本標題。");
+        headings.forEach((row) => {
+          const text = (row.text || "").trim();
+          lines.push("  ❯" + row.heading);
+          if (!text) {
+            lines.push("    PDF 沒有這段，留空");
+            return;
+          }
+          text.split("\n").forEach((part) => lines.push("    " + part));
+        });
       });
       const skipped = payload.skipped || [];
       if (skipped.length) {

@@ -27,6 +27,11 @@ def test_status_page_lists_ready_and_phase2(client):
     assert "查出還沒填的頁" in page
     assert "分析還沒填的頁" in page
     assert "/api/pipeline/unfilled/analyze" in page
+    assert "照 Notion 範本的每個標題整理" in page
+    assert "基地基本資料" in page
+    assert "期程規範" in page
+    assert "申請人資格" in page
+    assert "PDF 沒有這段，留空" in page
     assert "/api/pipeline/unfilled" in page
     assert "套用範本不算有內容" in page
     assert "概述：" in page
