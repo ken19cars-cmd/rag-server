@@ -475,7 +475,7 @@
 
     function formatUnfilledAnalysis(payload) {
       const lines = [];
-      lines.push("照 Notion 範本的每個標題整理。這個按鈕只做出分析 JSON，不寫入 Notion。");
+      lines.push("照 Notion 範本的每個標題整理。這個按鈕只做出分析 JSON，不寫入 Notion。同一頁的區塊只讀一次；若 Notion 暫時限制讀取，會等一下再試。");
       const analyses = payload.analyses || [];
       const sections = payload.sections || [];
       lines.push("");
@@ -512,7 +512,7 @@
 
     async function analyzeUnfilled() {
       const out = document.getElementById("scan-out");
-      out.textContent = "分析中…";
+      out.textContent = "分析中…同一頁的區塊只讀一次。若 Notion 暫時限制讀取，會等一下再試，請先不要重按。";
       const res = await fetch("/api/pipeline/unfilled/analyze", { method: "POST" });
       const body = await res.json();
       out.textContent = res.ok ? formatUnfilledAnalysis(body) : explainScan(res.status, body);

@@ -141,6 +141,22 @@ def test_fetch_notion_database_sends_completed_filter():
     assert seen["body"]["filter"]["status"]["equals"] == "招標完成"
 
 
+def test_fetch_notion_database_waits_out_a_rate_limit():
+    waits: list[float] = []
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429, headers={"retry-after": "2"}, json={"object": "error"})
+        return httpx.Response(200, json={"results": [], "has_more": False})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        payload = fetch_notion_database("secret-token", "db123", client=client, sleep=waits.append)
+    assert payload["results"] == []
+    assert waits == [2.0]
+
+
 def test_research_respects_robots_and_keeps_rendering_urls():
     fetcher = MapFetcher()
     case = CompletedCase(

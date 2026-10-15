@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import contextvars
 import re
+import time
 import unicodedata
 
 import httpx
 
-from rag_server.completed import NOTION_VERSION, case_match_key
+from rag_server.completed import (
+    NOTION_RATE_RETRIES,
+    NOTION_VERSION,
+    case_match_key,
+    notion_retry_delay,
+)
 from rag_server.notion_analysis import TemplateBlock, parse_template_blocks
 
 _CONTAINER_TYPES = frozenset({"column_list", "column", "synced_block", "toggle", "table"})
@@ -58,6 +65,48 @@ _CONTENT_TYPES = frozenset(
 )
 
 _PIECE_SPLIT = re.compile(r"[\n\r]+|[•・●○▪▸►]")
+_MIN_GAP_SECONDS = 0.35
+_pace_var: contextvars.ContextVar["NotionPace | None"] = contextvars.ContextVar(
+    "notion_block_pace",
+    default=None,
+)
+
+
+class NotionPace:
+    """Keep block reads under Notion's average of three requests a second."""
+
+    def __init__(self, sleep=time.sleep, clock=time.monotonic, gap: float = _MIN_GAP_SECONDS):
+        self._sleep = sleep
+        self._clock = clock
+        self._gap = gap
+        self._next = 0.0
+
+    def wait(self) -> None:
+        now = self._clock()
+        if now < self._next:
+            self._sleep(self._next - now)
+        self._next = self._clock() + self._gap
+
+    def pause(self, seconds: float) -> None:
+        self._sleep(seconds)
+        self._next = self._clock() + self._gap
+
+
+class paced_notion_reads:
+    """Share one pace across every block read in a scan."""
+
+    def __init__(self, sleep=time.sleep, clock=time.monotonic, gap: float = _MIN_GAP_SECONDS):
+        self._pace = NotionPace(sleep=sleep, clock=clock, gap=gap)
+        self._token: contextvars.Token | None = None
+
+    def __enter__(self) -> "paced_notion_reads":
+        self._token = _pace_var.set(self._pace)
+        return self
+
+    def __exit__(self, *_exc) -> bool:
+        if self._token is not None:
+            _pace_var.reset(self._token)
+        return False
 
 
 def fetch_block_children(
@@ -65,13 +114,14 @@ def fetch_block_children(
     block_id: str,
     *,
     client: httpx.Client | None = None,
+    sleep=time.sleep,
 ) -> list[dict]:
     """Return a page's blocks, including blocks nested in columns, toggles, and tables."""
     owns = client is None
     http = client or httpx.Client(timeout=30.0)
     try:
-        direct = _fetch_direct_children(token, block_id, http)
-        return _expand_containers(token, direct, http)
+        direct = _fetch_direct_children(token, block_id, http, sleep)
+        return _expand_containers(token, direct, http, sleep)
     except httpx.HTTPError as exc:
         raise RuntimeError(f"notion blocks failed: {exc}") from exc
     finally:
@@ -79,7 +129,12 @@ def fetch_block_children(
             http.close()
 
 
-def _fetch_direct_children(token: str, block_id: str, http: httpx.Client) -> list[dict]:
+def _fetch_direct_children(
+    token: str,
+    block_id: str,
+    http: httpx.Client,
+    sleep,
+) -> list[dict]:
     """Return the direct children of a Notion block, following next_cursor."""
     results: list[dict] = []
     cursor = None
@@ -87,14 +142,9 @@ def _fetch_direct_children(token: str, block_id: str, http: httpx.Client) -> lis
         params: dict[str, str | int] = {"page_size": 100}
         if cursor:
             params["start_cursor"] = cursor
-        response = http.get(
-            f"https://api.notion.com/v1/blocks/{block_id}/children",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "Notion-Version": NOTION_VERSION,
-            },
-            params=params,
-        )
+        response = _get_children(token, block_id, http, params, sleep)
+        if response.status_code == 429:
+            raise RuntimeError("Notion 讀取太快被限制，請稍後再按一次。")
         if response.status_code >= 400:
             detail = response.text[:180].replace("\n", " ")
             raise RuntimeError(f"notion blocks failed: {response.status_code} {detail}")
@@ -109,7 +159,37 @@ def _fetch_direct_children(token: str, block_id: str, http: httpx.Client) -> lis
             return results
 
 
-def _expand_containers(token: str, blocks: list[dict], http: httpx.Client, depth: int = 0) -> list[dict]:
+def _get_children(token: str, block_id: str, http: httpx.Client, params: dict, sleep) -> httpx.Response:
+    attempt = 0
+    while True:
+        pace = _pace_var.get()
+        if pace is not None:
+            pace.wait()
+        response = http.get(
+            f"https://api.notion.com/v1/blocks/{block_id}/children",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Notion-Version": NOTION_VERSION,
+            },
+            params=params,
+        )
+        if response.status_code != 429 or attempt >= NOTION_RATE_RETRIES:
+            return response
+        attempt += 1
+        delay = notion_retry_delay(response, attempt)
+        if pace is not None:
+            pace.pause(delay)
+        else:
+            sleep(delay)
+
+
+def _expand_containers(
+    token: str,
+    blocks: list[dict],
+    http: httpx.Client,
+    sleep,
+    depth: int = 0,
+) -> list[dict]:
     if depth >= _MAX_NESTING:
         return blocks
     expanded: list[dict] = []
@@ -120,8 +200,8 @@ def _expand_containers(token: str, blocks: list[dict], http: httpx.Client, depth
         block_id = str(block.get("id") or "").strip()
         if not block_id:
             continue
-        children = _fetch_direct_children(token, block_id, http)
-        expanded.extend(_expand_containers(token, children, http, depth + 1))
+        children = _fetch_direct_children(token, block_id, http, sleep)
+        expanded.extend(_expand_containers(token, children, http, sleep, depth + 1))
     return expanded
 
 

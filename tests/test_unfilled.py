@@ -11,7 +11,7 @@ from rag_server.config import Settings
 from rag_server.embeddings import FakeEmbedder
 from rag_server.main import create_app
 from rag_server.corpus import is_metro_joint_type
-from rag_server.notion_blocks import fetch_block_children, overview_reading, overview_state
+from rag_server.notion_blocks import fetch_block_children, overview_reading, overview_state, paced_notion_reads
 
 
 def _rich(text: str) -> dict:
@@ -138,6 +138,59 @@ def test_fetch_block_children_reads_a_column_template():
     client.close()
 
 
+def test_fetch_block_children_waits_out_a_rate_limit():
+    waits: list[float] = []
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] < 3:
+            return httpx.Response(429, headers={"retry-after": "0"}, json={"object": "error", "status": 429})
+        return httpx.Response(200, json={"results": [_heading("❯計畫概述"), _paragraph("")], "has_more": False})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    blocks = fetch_block_children("secret", "page-1", client=client, sleep=waits.append)
+    assert overview_state(blocks) == "empty"
+    assert waits == [0.5, 1.0]
+    client.close()
+
+
+def test_fetch_block_children_stops_after_repeated_rate_limits():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429,
+            json={"object": "error", "status": 429, "code": "rate_limited", "message": "You have been rate limited."},
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        fetch_block_children("secret", "page-1", client=client, sleep=lambda _seconds: None)
+    except RuntimeError as exc:
+        assert str(exc) == "Notion 讀取太快被限制，請稍後再按一次。"
+    else:
+        raise AssertionError("rate limit should stop the read")
+    client.close()
+
+
+def test_paced_reads_leave_a_gap_between_block_requests():
+    clock = {"now": 0.0}
+    waits: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        waits.append(seconds)
+        clock["now"] += seconds
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"results": [_paragraph("")], "has_more": False})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    with paced_notion_reads(sleep=sleep, clock=lambda: clock["now"], gap=0.35):
+        fetch_block_children("secret", "page-1", client=client, sleep=lambda _seconds: None)
+        fetch_block_children("secret", "page-2", client=client, sleep=lambda _seconds: None)
+    assert waits == [0.35]
+    client.close()
+
+
 def test_metro_joint_type_is_the_folder_category():
     assert is_metro_joint_type("2.捷運聯開")
     assert is_metro_joint_type("2.捷運聯合開發")
@@ -226,6 +279,7 @@ def test_unfilled_route_lists_blank_pages_and_skips_filled_ones(tmp_path: Path, 
         listed = client.get("/api/pipeline/unfilled", params={"root": str(root)})
     assert listed.status_code == 200
     body = listed.json()
+    assert "blocks_by_id" not in body
     assert [item["case_name"] for item in body["unfilled_matched"]] == ["示範空白案"]
     assert body["unfilled_matched"][0]["overview"] == "empty"
     assert body["unfilled_matched"][0]["folder_name"] == "示範空白案"
@@ -294,7 +348,10 @@ def test_unfilled_analyze_uses_real_block_ids_and_does_not_write(tmp_path: Path,
             "has_more": False,
         }
 
+    seen_blocks: list[str] = []
+
     def fake_blocks(token, block_id, *, client=None):
+        seen_blocks.append(block_id)
         return blocks[block_id]
 
     monkeypatch.setattr("rag_server.service.fetch_notion_database", fake_fetch)
@@ -330,6 +387,8 @@ def test_unfilled_analyze_uses_real_block_ids_and_does_not_write(tmp_path: Path,
     assert "公辦都市更新" in body["sections"][0]["headings"][0]["text"]
     assert body["skipped"] == []
     assert body["errors"] == []
+    assert "blocks_by_id" not in body
+    assert seen_blocks.count("page-blank") == 1
     assert written.status_code == 501
 
 

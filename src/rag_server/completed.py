@@ -11,6 +11,7 @@ from __future__ import annotations
 import csv
 import json
 import re
+import time
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,6 +29,7 @@ from rag_server.crawler import (
 
 QUERY_SUFFIXES = ("最優申請人", "得標", "規劃", "建築效果模擬圖")
 NOTION_VERSION = "2022-06-28"
+NOTION_RATE_RETRIES = 5
 RENDERING_HINTS = ("效果圖", "模擬圖", "示意圖", "建築效果", "外觀透視", "rendering", "perspective")
 
 
@@ -96,12 +98,34 @@ OPEN_STATUS_FILTER = {
 }
 
 
+def notion_retry_delay(response: httpx.Response, attempt: int) -> float:
+    """Seconds to wait after a Notion 429. Honor Retry-After, otherwise back off."""
+    header = response.headers.get("retry-after", "").strip()
+    try:
+        seconds = float(header)
+    except ValueError:
+        seconds = 0.0
+    backoff = min(8.0, 0.5 * (2 ** (attempt - 1)))
+    return max(seconds, backoff)
+
+
+def _notion_response(request, *, sleep=time.sleep) -> httpx.Response:
+    attempt = 0
+    while True:
+        response = request()
+        if response.status_code != 429 or attempt >= NOTION_RATE_RETRIES:
+            return response
+        attempt += 1
+        sleep(notion_retry_delay(response, attempt))
+
+
 def fetch_notion_database(
     token: str,
     database_id: str,
     *,
     client: httpx.Client | None = None,
     status_filter: dict | None = None,
+    sleep=time.sleep,
 ) -> dict:
     """Query a Notion database. The default filter is 招商情形 = 招標完成.
 
@@ -118,15 +142,20 @@ def fetch_notion_database(
             body: dict = {"filter": chosen, "page_size": 100}
             if cursor:
                 body["start_cursor"] = cursor
-            response = http.post(
-                f"https://api.notion.com/v1/databases/{database_id}/query",
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Notion-Version": NOTION_VERSION,
-                    "Content-Type": "application/json",
-                },
-                json=body,
+            response = _notion_response(
+                lambda: http.post(
+                    f"https://api.notion.com/v1/databases/{database_id}/query",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Notion-Version": NOTION_VERSION,
+                        "Content-Type": "application/json",
+                    },
+                    json=body,
+                ),
+                sleep=sleep,
             )
+            if response.status_code == 429:
+                raise RuntimeError("Notion 讀取太快被限制，請稍後再按一次。")
             response.raise_for_status()
             payload = response.json()
             if not isinstance(payload, dict):

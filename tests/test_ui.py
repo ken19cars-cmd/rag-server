@@ -28,6 +28,8 @@ def test_status_page_lists_ready_and_phase2(client):
     assert "分析還沒填的頁" in page
     assert "/api/pipeline/unfilled/analyze" in page
     assert "照 Notion 範本的每個標題整理" in page
+    assert "同一頁的區塊只讀一次" in page
+    assert "請先不要重按" in page
     assert "基地基本資料" in page
     assert "期程規範" in page
     assert "申請人資格" in page

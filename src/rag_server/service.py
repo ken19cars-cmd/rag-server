@@ -36,7 +36,7 @@ from rag_server.crawler import CrawledDocument, Crawler, Fetcher, HttpFetcher
 from rag_server.embeddings import Embedder
 from rag_server.llm import LlmClient
 from rag_server.notion_analysis import analyze_to_notion, parse_template_blocks, section_lines
-from rag_server.notion_blocks import fetch_block_children, overview_reading
+from rag_server.notion_blocks import fetch_block_children, overview_reading, paced_notion_reads
 from rag_server.pdf_extract import ExtractedPage, OcrEngine, TesseractOcrEngine, extract_pdf_bytes
 from rag_server.schemas import (
     AnalysisResponse,
@@ -497,7 +497,7 @@ class CaseService:
             llm=self.llm,
         )
 
-    def list_unfilled_notion_cases(self, root: str = "") -> dict:
+    def list_unfilled_notion_cases(self, root: str = "", *, keep_blocks: bool = False) -> dict:
         """List in-progress pages the server can fill after 案件介紹範本 is applied.
 
         招標完成 pages are not read and do not need that template. 捷運聯開
@@ -517,6 +517,7 @@ class CaseService:
         intro_skipped = 0
         work_pages: list[CompletedCase] = []
         metro_joint_skipped = 0
+        blocks_by_id: dict[str, list[dict]] = {}
         for page in open_pages:
             if page.case_name.strip() == "案件介紹":
                 intro_skipped += 1
@@ -534,7 +535,7 @@ class CaseService:
         metro_joint_skipped += len(metro_ids)
         pages_to_read = [page for page in work_pages if page.notion_page_id not in metro_ids]
         work_folders = [folder for folder in folders if not is_metro_joint_type(folder.case_type)]
-        with httpx.Client(timeout=30.0) as http:
+        with httpx.Client(timeout=30.0) as http, paced_notion_reads():
             for page in pages_to_read:
                 if not page.notion_page_id:
                     errors.append(_unfilled_page_row(page) | {"error": "頁面沒有 id"})
@@ -544,6 +545,8 @@ class CaseService:
                 except RuntimeError as exc:
                     errors.append(_unfilled_page_row(page) | {"error": str(exc)})
                     continue
+                if keep_blocks:
+                    blocks_by_id[page.notion_page_id] = raw_blocks
                 reading = overview_reading(raw_blocks, case_name=page.case_name)
                 state = reading["state"]
                 if state == "filled":
@@ -558,7 +561,7 @@ class CaseService:
         used = {item["source_path"] for item in paired["matched"]}
         remaining = [folder for folder in work_folders if str(folder.folder) not in used]
         template_paired = pair_notion_pages_to_folders(needs_template, remaining)
-        return {
+        result = {
             "unfilled_matched": [
                 _with_overview(item, overview_by_id) for item in paired["matched"]
             ],
@@ -574,6 +577,9 @@ class CaseService:
             "metro_joint_skipped": metro_joint_skipped,
             "errors": errors,
         }
+        if keep_blocks:
+            result["blocks_by_id"] = blocks_by_id
+        return result
 
     def analyze_unfilled_notion_cases(self, root: str = "") -> dict:
         """Build section-38 JSON for matched pages whose overview is still empty.
@@ -583,7 +589,8 @@ class CaseService:
         the page, including headings the PDF left blank. 招商情形、編輯者、
         廠商數量、日期進度 stay off the JSON. This does not write Notion.
         """
-        listed = self.list_unfilled_notion_cases(root)
+        listed = self.list_unfilled_notion_cases(root, keep_blocks=True)
+        blocks_by_id = listed.pop("blocks_by_id", {})
         ready = [
             item
             for item in listed["unfilled_matched"]
@@ -601,11 +608,16 @@ class CaseService:
         token = self.settings.notion_token.strip()
         analyses: list[dict] = []
         sections: list[dict] = []
-        errors: list[dict] = []
-        with httpx.Client(timeout=30.0) as http:
+        errors: list[dict] = [
+            {"case_name": item.get("case_name") or "", "error": item.get("error") or ""}
+            for item in listed["errors"]
+        ]
+        with httpx.Client(timeout=30.0) as http, paced_notion_reads():
             for item in ready:
                 try:
-                    blocks = fetch_block_children(token, item["notion_page_id"], client=http)
+                    blocks = blocks_by_id.get(item["notion_page_id"])
+                    if blocks is None:
+                        blocks = fetch_block_children(token, item["notion_page_id"], client=http)
                     result = self.analyze_notion(
                         case_name=item["case_name"],
                         page_id=item["notion_page_id"],
