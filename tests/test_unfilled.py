@@ -270,3 +270,60 @@ def test_unfilled_route_lists_blank_pages_and_skips_filled_ones(tmp_path: Path, 
     with TestClient(create_app(bare, embedder=FakeEmbedder())) as client:
         denied = client.get("/api/pipeline/unfilled", params={"root": str(root)})
     assert denied.status_code == 400
+
+
+def test_unfilled_analyze_uses_real_block_ids_and_does_not_write(tmp_path: Path, monkeypatch):
+    root = tmp_path / "cases"
+    folder = root / "1.都市更新" / "00彰化縣" / "彰化示範都更案"
+    folder.mkdir(parents=True)
+    (folder / "申請須知.txt").write_text("計畫概述：本示範案為公辦都市更新。", encoding="utf-8")
+    blocks = {
+        "page-blank": [_heading("❯計畫概述"), _paragraph("")],
+        "page-filled": [_heading("❯計畫概述"), _paragraph("已經寫過。")],
+        "page-broken": [_heading("❯計畫概述")],
+    }
+
+    def fake_fetch(token, database_id, *, client=None, status_filter=None):
+        return {
+            "results": [
+                _page("page-blank", "彰化示範都更案", "公告中"),
+                _page("page-filled", "已經填過的案", "公告中"),
+                _page("page-broken", "標題下沒有段落", "前置作業"),
+            ],
+            "has_more": False,
+        }
+
+    def fake_blocks(token, block_id, *, client=None):
+        return blocks[block_id]
+
+    monkeypatch.setattr("rag_server.service.fetch_notion_database", fake_fetch)
+    monkeypatch.setattr("rag_server.service.fetch_block_children", fake_blocks)
+    settings = Settings(
+        data_dir=str(tmp_path / "data"),
+        embedding_backend="fake",
+        notion_token="secret",
+        notion_database_id="db123",
+        llm_base_url="",
+        llm_api_key="",
+        llm_model="",
+    )
+    from fastapi.testclient import TestClient
+
+    with TestClient(create_app(settings, embedder=FakeEmbedder())) as client:
+        analyzed = client.post("/api/pipeline/unfilled/analyze", params={"root": str(root)})
+        written = client.post("/api/pipeline/notion/write")
+    assert analyzed.status_code == 200
+    body = analyzed.json()
+    assert [item["caseName"] for item in body["analyses"]] == ["彰化示範都更案"]
+    result = body["analyses"][0]
+    assert set(result) == {"pageId", "caseName", "baseTable", "landUseTable", "updates"}
+    assert result["pageId"] == "page-blank"
+    overview = [item for item in result["updates"] if item["blockId"] == "p-overview"]
+    assert len(overview) == 1
+    assert "公辦都市更新" in overview[0]["value"]
+    assert "招商情形" not in analyzed.text
+    assert "編輯者" not in analyzed.text
+    assert "廠商數量" not in analyzed.text
+    assert body["skipped"] == []
+    assert body["errors"] == []
+    assert written.status_code == 501

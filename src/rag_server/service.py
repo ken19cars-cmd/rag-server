@@ -575,6 +575,48 @@ class CaseService:
             "errors": errors,
         }
 
+    def analyze_unfilled_notion_cases(self, root: str = "") -> dict:
+        """Build section-38 JSON for matched pages whose overview is still empty.
+
+        The JSON uses that page's real block ids and the local case folder.
+        招商情形、編輯者、廠商數量、日期進度 stay off the JSON. This does not
+        write Notion.
+        """
+        listed = self.list_unfilled_notion_cases(root)
+        ready = [
+            item
+            for item in listed["unfilled_matched"]
+            if item.get("overview") in {"empty", "template"}
+        ]
+        skipped = [
+            {
+                "case_name": item["case_name"],
+                "notion_page_id": item["notion_page_id"],
+                "reason": "標題下沒有段落",
+            }
+            for item in listed["unfilled_matched"]
+            if item.get("overview") == "missing_paragraph"
+        ]
+        token = self.settings.notion_token.strip()
+        analyses: list[dict] = []
+        errors: list[dict] = []
+        with httpx.Client(timeout=30.0) as http:
+            for item in ready:
+                try:
+                    blocks = fetch_block_children(token, item["notion_page_id"], client=http)
+                    result = self.analyze_notion(
+                        case_name=item["case_name"],
+                        page_id=item["notion_page_id"],
+                        case_folder=item["source_path"],
+                        root=root,
+                        template_blocks=blocks,
+                    )
+                except (IngestError, RuntimeError) as exc:
+                    errors.append({"case_name": item["case_name"], "error": str(exc)})
+                    continue
+                analyses.append(result)
+        return {"analyses": analyses, "skipped": skipped, "errors": errors}
+
     def match_open_notion_cases(self, root: str = "") -> dict:
         """Pair Notion pages with local case folders, and label 招標完成 separately.
 

@@ -224,6 +224,10 @@ def create_app(
     def unfilled_pages(root: str = "") -> dict:
         return app.state.service.list_unfilled_notion_cases(root)
 
+    @app.post("/api/pipeline/unfilled/analyze")
+    def analyze_unfilled(root: str = "") -> dict:
+        return app.state.service.analyze_unfilled_notion_cases(root)
+
     @app.post(
         "/api/notion/analyze",
         response_model=NotionAnalysisResult,

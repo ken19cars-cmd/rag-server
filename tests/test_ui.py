@@ -25,6 +25,8 @@ def test_status_page_lists_ready_and_phase2(client):
         assert "CASES_ROOT" in page
     assert "對上本地案件" in page
     assert "查出還沒填的頁" in page
+    assert "分析還沒填的頁" in page
+    assert "/api/pipeline/unfilled/analyze" in page
     assert "/api/pipeline/unfilled" in page
     assert "套用範本不算有內容" in page
     assert "概述：" in page

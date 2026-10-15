@@ -158,6 +158,7 @@
           <h3>未完成頁對上資料夾</h3>
           <p><code>GET /api/pipeline/local-match</code>。進行中的頁先對頁名，再對地號，再把少寫的縣、市補上。招標完成的頁另外列出。這個對照不改資料夾名稱，也不把分析內容寫進頁面。</p>
           <p><code>GET /api/pipeline/unfilled</code>。只看進行中的頁。招標完成不必套案件介紹範本，不在這一份。捷運聯開這個類別可以沒有 ❯計畫概述，只計件數、不列案名。其他進行中的頁要先有 ❯計畫概述這類標題，伺服器才照標題下面填。還沒套用範本的頁會另列。概述只有範本或頁名，算還沒填。已經寫了本案內容的頁會附上那段概述。不更新 Notion。</p>
+          <p><code>POST /api/pipeline/unfilled/analyze</code>。只分析已對上資料夾、而且概述還沒寫本案內容的頁。用該頁真實的 block id 和本地 PDF。招商情形、編輯者、廠商數量、日期進度不進 JSON。不寫入 Notion。</p>
         </article>
         <article>
           <h3>PDF 寫入與合併</h3>
@@ -221,6 +222,7 @@
       <button type="button" id="scan-demo">掃描內建示範樹</button>
       <button type="button" id="local-match">對上本地案件</button>
       <button type="button" id="unfilled">查出還沒填的頁</button>
+      <button type="button" id="analyze-unfilled">分析還沒填的頁</button>
       <pre id="scan-out">尚未掃描。</pre>
     </section>
 
@@ -471,6 +473,42 @@
       return lines.join("\n");
     }
 
+    function formatUnfilledAnalysis(payload) {
+      const lines = [];
+      lines.push("這個按鈕只做出分析 JSON，不寫入 Notion。");
+      const analyses = payload.analyses || [];
+      lines.push("");
+      lines.push("分析 " + analyses.length + " 件");
+      analyses.forEach((item) => {
+        lines.push(item.caseName || "");
+        const updates = item.updates || [];
+        const overview = updates.find((update) => (update.reason || "").indexOf("計畫概述") >= 0);
+        lines.push("  計畫概述：" + (overview ? overview.value : "PDF 沒有這段，留空"));
+        lines.push("  更新 " + updates.length + " 筆");
+      });
+      const skipped = payload.skipped || [];
+      if (skipped.length) {
+        lines.push("");
+        lines.push("標題下沒有段落，這次不分析 " + skipped.length + " 件");
+        skipped.forEach((item) => lines.push(item.case_name));
+      }
+      const errors = payload.errors || [];
+      if (errors.length) {
+        lines.push("");
+        lines.push("分析失敗 " + errors.length + " 件");
+        errors.forEach((item) => lines.push(item.case_name + "（" + item.error + "）"));
+      }
+      return lines.join("\n");
+    }
+
+    async function analyzeUnfilled() {
+      const out = document.getElementById("scan-out");
+      out.textContent = "分析中…";
+      const res = await fetch("/api/pipeline/unfilled/analyze", { method: "POST" });
+      const body = await res.json();
+      out.textContent = res.ok ? formatUnfilledAnalysis(body) : explainScan(res.status, body);
+    }
+
     async function listUnfilled() {
       const out = document.getElementById("scan-out");
       out.textContent = "讀取頁面中…";
@@ -587,6 +625,7 @@
     document.getElementById("scan-demo").addEventListener("click", () => scan(demo.demoRoot));
     document.getElementById("local-match").addEventListener("click", matchLocal);
     document.getElementById("unfilled").addEventListener("click", listUnfilled);
+    document.getElementById("analyze-unfilled").addEventListener("click", analyzeUnfilled);
     document.getElementById("analyze").addEventListener("click", analyze);
     document.getElementById("ask").addEventListener("click", ask);
     document.getElementById("research").addEventListener("click", research);
