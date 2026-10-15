@@ -72,6 +72,12 @@ def normalize_city(folder_name: str) -> str:
     return stripped or folder_name.strip()
 
 
+def is_metro_joint_type(case_type: str) -> bool:
+    """捷運聯開 cases may have no ❯計畫概述. The folder may say 捷運聯合開發."""
+    text = re.sub(r"^\d+[.．、_\-\s]*", "", case_type or "").replace(" ", "")
+    return "捷運聯開" in text or "捷運聯合開發" in text
+
+
 def scan_cases_root(root: Path) -> list[CorpusCase]:
     root = root.expanduser().resolve()
     if not root.is_dir():

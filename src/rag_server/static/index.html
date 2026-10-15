@@ -157,7 +157,7 @@
         <article>
           <h3>未完成頁對上資料夾</h3>
           <p><code>GET /api/pipeline/local-match</code>。進行中的頁先對頁名，再對地號，再把少寫的縣、市補上。招標完成的頁另外列出。這個對照不改資料夾名稱，也不把分析內容寫進頁面。</p>
-          <p><code>GET /api/pipeline/unfilled</code>。只看進行中的頁。招標完成不必套案件介紹範本，不在這一份。進行中的頁要先有 ❯計畫概述這類標題，伺服器才照標題下面填。還沒套用範本的頁會另列。概述只有範本或頁名，算還沒填。已經寫了本案內容的頁會附上那段概述。不更新 Notion。</p>
+          <p><code>GET /api/pipeline/unfilled</code>。只看進行中的頁。招標完成不必套案件介紹範本，不在這一份。捷運聯開這個類別可以沒有 ❯計畫概述，只計件數、不列案名。其他進行中的頁要先有 ❯計畫概述這類標題，伺服器才照標題下面填。還沒套用範本的頁會另列。概述只有範本或頁名，算還沒填。已經寫了本案內容的頁會附上那段概述。不更新 Notion。</p>
         </article>
         <article>
           <h3>PDF 寫入與合併</h3>
@@ -403,7 +403,7 @@
 
     function formatUnfilled(payload) {
       const lines = [];
-      lines.push("進行中的頁要先套上案件介紹範本。這個按鈕列出標題下面還沒寫本案內容的頁，不寫入 Notion。套用範本不算有內容。招標完成不必套這個範本，沒有列在這裡。");
+      lines.push("進行中的頁要先套上案件介紹範本。這個按鈕列出標題下面還沒寫本案內容的頁，不寫入 Notion。套用範本不算有內容。招標完成不必套這個範本，沒有列在這裡。捷運聯開可以沒有 ❯計畫概述，略過。");
       lines.push("");
       const matched = payload.unfilled_matched || [];
       lines.push("還沒填，已對上資料夾 " + matched.length + " 件");
@@ -457,6 +457,9 @@
         lines.push("");
         lines.push("案件介紹不是案件頁，略過。");
       }
+      lines.push("");
+      lines.push("捷運聯開 " + (payload.metro_joint_skipped || 0) + " 件");
+      lines.push("這類案件可以沒有 ❯計畫概述，略過。");
       const errors = payload.errors || [];
       if (errors.length) {
         lines.push("");

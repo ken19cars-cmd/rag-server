@@ -27,6 +27,7 @@ from rag_server.config import Settings
 from rag_server.corpus import (
     CorpusCase,
     folders_for_local_match,
+    is_metro_joint_type,
     merge_document_texts,
     retarget_folders_named_like,
     scan_cases_root,
@@ -499,10 +500,11 @@ class CaseService:
     def list_unfilled_notion_cases(self, root: str = "") -> dict:
         """List in-progress pages the server can fill after 案件介紹範本 is applied.
 
-        招標完成 pages are not read and do not need that template. A page with
-        no ❯計畫概述 still needs the template; it is listed separately and is
-        not written. Template hint text is not case content. This does not
-        update Notion.
+        招標完成 pages are not read and do not need that template. 捷運聯開
+        pages are counted and skipped; that category may have no ❯計畫概述.
+        A page with no ❯計畫概述 still needs the template; it is listed
+        separately and is not written. Template hint text is not case content.
+        This does not update Notion.
         """
         open_pages, _completed, folders, _root = self._pages_and_folders(root)
         token = self.settings.notion_token.strip()
@@ -513,11 +515,27 @@ class CaseService:
         overview_by_id: dict[str, str] = {}
         headings_by_id: dict[str, list[str]] = {}
         intro_skipped = 0
+        work_pages: list[CompletedCase] = []
+        metro_joint_skipped = 0
+        for page in open_pages:
+            if page.case_name.strip() == "案件介紹":
+                intro_skipped += 1
+                continue
+            if is_metro_joint_type(page.case_type):
+                metro_joint_skipped += 1
+                continue
+            work_pages.append(page)
+        identified = pair_notion_pages_to_folders(work_pages, folders)
+        metro_ids = {
+            item["notion_page_id"]
+            for item in identified["matched"]
+            if is_metro_joint_type(str(item.get("case_type") or ""))
+        }
+        metro_joint_skipped += len(metro_ids)
+        pages_to_read = [page for page in work_pages if page.notion_page_id not in metro_ids]
+        work_folders = [folder for folder in folders if not is_metro_joint_type(folder.case_type)]
         with httpx.Client(timeout=30.0) as http:
-            for page in open_pages:
-                if page.case_name.strip() == "案件介紹":
-                    intro_skipped += 1
-                    continue
+            for page in pages_to_read:
                 if not page.notion_page_id:
                     errors.append(_unfilled_page_row(page) | {"error": "頁面沒有 id"})
                     continue
@@ -536,9 +554,9 @@ class CaseService:
                 else:
                     overview_by_id[page.notion_page_id] = state
                     unfilled_pages.append(page)
-        paired = pair_notion_pages_to_folders(unfilled_pages, folders)
+        paired = pair_notion_pages_to_folders(unfilled_pages, work_folders)
         used = {item["source_path"] for item in paired["matched"]}
-        remaining = [folder for folder in folders if str(folder.folder) not in used]
+        remaining = [folder for folder in work_folders if str(folder.folder) not in used]
         template_paired = pair_notion_pages_to_folders(needs_template, remaining)
         return {
             "unfilled_matched": [
@@ -553,6 +571,7 @@ class CaseService:
                 for item in template_paired["matched"] + template_paired["notion_without_folder"]
             ],
             "intro_skipped": intro_skipped,
+            "metro_joint_skipped": metro_joint_skipped,
             "errors": errors,
         }
 

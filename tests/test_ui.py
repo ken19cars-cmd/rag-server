@@ -31,6 +31,8 @@ def test_status_page_lists_ready_and_phase2(client):
     assert "讀到的標題" in page
     assert "還沒套用案件介紹範本" in page
     assert "招標完成不必套這個範本" in page
+    assert "捷運聯開可以沒有 ❯計畫概述，略過。" in page
+    assert "這類案件可以沒有 ❯計畫概述，略過。" in page
     assert "案件介紹不是案件頁" in page
     assert "只有範本" in page
     assert "計畫概述已寫了本案內容" in page

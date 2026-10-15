@@ -9,6 +9,7 @@ import httpx
 from rag_server.config import Settings
 from rag_server.embeddings import FakeEmbedder
 from rag_server.main import create_app
+from rag_server.corpus import is_metro_joint_type
 from rag_server.notion_blocks import fetch_block_children, overview_reading, overview_state
 
 
@@ -136,14 +137,22 @@ def test_fetch_block_children_reads_a_column_template():
     client.close()
 
 
-def _page(page_id: str, name: str, status: str) -> dict:
-    return {
-        "id": page_id,
-        "properties": {
-            "案件名稱": {"type": "title", "title": [{"plain_text": name}]},
-            "招商情形": {"type": "status", "status": {"name": status}},
-        },
+def test_metro_joint_type_is_the_folder_category():
+    assert is_metro_joint_type("2.捷運聯開")
+    assert is_metro_joint_type("2.捷運聯合開發")
+    assert is_metro_joint_type("捷運聯開")
+    assert not is_metro_joint_type("1.都市更新")
+    assert not is_metro_joint_type("捷運站旁都更案")
+
+
+def _page(page_id: str, name: str, status: str, case_type: str = "") -> dict:
+    properties = {
+        "案件名稱": {"type": "title", "title": [{"plain_text": name}]},
+        "招商情形": {"type": "status", "status": {"name": status}},
     }
+    if case_type:
+        properties["案件類型"] = {"type": "select", "select": {"name": case_type}}
+    return {"id": page_id, "properties": properties}
 
 
 def test_unfilled_route_lists_blank_pages_and_skips_filled_ones(tmp_path: Path, monkeypatch):
@@ -154,6 +163,9 @@ def test_unfilled_route_lists_blank_pages_and_skips_filled_ones(tmp_path: Path, 
     bare = root / "1.都市更新" / "00示範市" / "示範沒套範本"
     bare.mkdir(parents=True)
     (bare / "申請須知.txt").write_text("還沒套範本", encoding="utf-8")
+    metro = root / "2.捷運聯合開發" / "00新北市" / "捷運聯開空白案"
+    metro.mkdir(parents=True)
+    (metro / "申請須知.txt").write_text("捷運聯開可以沒有計畫概述", encoding="utf-8")
     blocks = {
         "page-blank": [_heading("❯計畫概述"), _paragraph("")],
         "page-filled": [_heading("❯計畫概述"), _paragraph("已經寫過。")],
@@ -183,6 +195,8 @@ def test_unfilled_route_lists_blank_pages_and_skips_filled_ones(tmp_path: Path, 
                 _page("page-broken", "標題下沒有段落", "前置作業"),
                 _page("page-title", "頁名就是概述的案", "前置作業"),
                 _page("page-intro", "案件介紹", "公告中"),
+                _page("page-metro", "捷運聯開空白案", "前置作業"),
+                _page("page-metro-typed", "類型已標捷運聯開", "公告中", "捷運聯開"),
                 _page("page-done", "招標完成案", "招標完成"),
             ],
             "has_more": False,
@@ -231,9 +245,19 @@ def test_unfilled_route_lists_blank_pages_and_skips_filled_ones(tmp_path: Path, 
     assert body["missing_heading"][1]["headings"] == ["❯其他"]
     assert "招標完成案" not in [item["case_name"] for item in body["missing_heading"]]
     assert body["intro_skipped"] == 1
+    assert body["metro_joint_skipped"] == 2
+    names = [
+        item["case_name"]
+        for key in ("unfilled_matched", "unfilled_without_folder", "filled", "missing_heading")
+        for item in body[key]
+    ]
+    assert "捷運聯開空白案" not in names
+    assert "類型已標捷運聯開" not in names
     assert body["errors"] == []
     assert "page-done" not in seen_blocks
     assert "page-intro" not in seen_blocks
+    assert "page-metro" not in seen_blocks
+    assert "page-metro-typed" not in seen_blocks
     assert blank.is_dir()
 
     bare = Settings(
